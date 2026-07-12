@@ -1,0 +1,6 @@
+/bin/
+/data/
+/.gocache/
+/.gomodcache/
+/.gopath/
+*.exe

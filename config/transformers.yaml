@@ -1,0 +1,6 @@
+transformers:
+  - operation: copy_rename
+    command:
+      - "bin/copy-rename.exe"
+    extensions:
+      - txt

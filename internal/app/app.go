@@ -1,0 +1,205 @@
+package app
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"log"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"time"
+
+	"filemill/internal/config"
+	"filemill/internal/contract"
+	"filemill/internal/store"
+	"github.com/google/uuid"
+)
+
+const timeout = 10 * time.Minute
+
+type App struct {
+	root, data string
+	cfg        config.Config
+	store      *store.Store
+	log        *log.Logger
+	logFile    *os.File
+}
+
+func Open(root string) (*App, error) {
+	data := filepath.Join(root, "data")
+	if err := os.MkdirAll(filepath.Join(data, "jobs"), 0755); err != nil {
+		return nil, err
+	}
+	if err := os.MkdirAll(filepath.Join(data, "logs"), 0755); err != nil {
+		return nil, err
+	}
+	cfg, err := config.Load(filepath.Join(root, "config", "transformers.yaml"))
+	if err != nil {
+		return nil, err
+	}
+	s, err := store.Open(filepath.Join(data, "filemill.db"))
+	if err != nil {
+		return nil, err
+	}
+	lf, err := os.OpenFile(filepath.Join(data, "logs", "filemill.log"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
+	if err != nil {
+		s.Close()
+		return nil, err
+	}
+	return &App{root: root, data: data, cfg: cfg, store: s, log: log.New(lf, "", log.LstdFlags|log.LUTC), logFile: lf}, nil
+}
+func (a *App) Close() error { a.logFile.Close(); return a.store.Close() }
+func (a *App) Submit(operation, source string) (string, error) {
+	t, ok := a.cfg.Find(operation)
+	if !ok {
+		return "", fmt.Errorf("unknown operation %q", operation)
+	}
+	info, err := os.Stat(source)
+	if err != nil {
+		return "", err
+	}
+	if info.IsDir() {
+		return "", fmt.Errorf("input must be a file")
+	}
+	if !t.Accepts(info.Name()) {
+		return "", fmt.Errorf("%s does not accept %q", operation, filepath.Ext(info.Name()))
+	}
+	id := uuid.NewString()
+	workspace := filepath.Join(a.data, "jobs", id)
+	input := filepath.Join(workspace, "input")
+	if err := os.MkdirAll(filepath.Join(workspace, "output"), 0755); err != nil {
+		return "", err
+	}
+	if err := os.MkdirAll(input, 0755); err != nil {
+		return "", err
+	}
+	name := filepath.Base(source)
+	if err := copyFile(source, filepath.Join(input, name)); err != nil {
+		return "", err
+	}
+	j := contract.Job{ContractVersion: contract.Version, JobID: id, Operation: operation, InputFiles: []contract.InputFile{{Path: filepath.ToSlash(filepath.Join("input", name)), Name: name}}, OutputDirectory: "output", Options: map[string]any{}}
+	b, err := json.MarshalIndent(j, "", "  ")
+	if err != nil {
+		return "", err
+	}
+	if err := os.WriteFile(filepath.Join(workspace, "job.json"), b, 0644); err != nil {
+		return "", err
+	}
+	if err := a.store.Create(store.Job{ID: id, Operation: operation, InputName: name, CreatedAt: time.Now()}); err != nil {
+		return "", err
+	}
+	a.log.Printf("job=%s status=queued operation=%s", id, operation)
+	return id, nil
+}
+func (a *App) Job(id string) (store.Job, error) { return a.store.Get(id) }
+func (a *App) Run(ctx context.Context, once bool) error {
+	a.log.Printf("worker started once=%t", once)
+	for {
+		j, err := a.store.Next()
+		if err != nil {
+			return err
+		}
+		if j != nil {
+			a.execute(ctx, *j)
+			if once {
+				return nil
+			}
+			continue
+		}
+		if once {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			a.log.Printf("worker stopped")
+			return nil
+		case <-time.After(time.Second):
+		}
+	}
+}
+func (a *App) execute(parent context.Context, j store.Job) {
+	t, ok := a.cfg.Find(j.Operation)
+	if !ok {
+		a.finish(j.ID, "failed", "registered transformer no longer exists")
+		return
+	}
+	workspace := filepath.Join(a.data, "jobs", j.ID)
+	ctx, cancel := context.WithTimeout(parent, timeout)
+	defer cancel()
+	args := append(append([]string{}, t.Command[1:]...), "job.json")
+	cmd := exec.CommandContext(ctx, t.Command[0], args...)
+	cmd.Dir = workspace
+	output, err := cmd.CombinedOutput()
+	if len(output) > 0 {
+		a.log.Printf("job=%s transformer_output=%s", j.ID, strings.TrimSpace(string(output)))
+	}
+	if ctx.Err() == context.DeadlineExceeded {
+		a.finish(j.ID, "failed", "transformer timed out after 10 minutes")
+		return
+	}
+	result, readErr := readResult(filepath.Join(workspace, "result.json"), workspace)
+	if err != nil {
+		msg := "transformer exited unsuccessfully"
+		if readErr == nil && result.Message != "" {
+			msg = result.Message
+		}
+		a.finish(j.ID, "failed", msg)
+		return
+	}
+	if readErr != nil {
+		a.finish(j.ID, "failed", readErr.Error())
+		return
+	}
+	if !result.Success {
+		a.finish(j.ID, "failed", result.Message)
+		return
+	}
+	a.finish(j.ID, "succeeded", result.Message)
+}
+func (a *App) finish(id, status, message string) {
+	if err := a.store.Complete(id, status, message); err != nil {
+		a.log.Printf("job=%s completion_error=%v", id, err)
+		return
+	}
+	a.log.Printf("job=%s status=%s message=%q", id, status, message)
+}
+func readResult(path, workspace string) (contract.Result, error) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return contract.Result{}, fmt.Errorf("result.json missing: %w", err)
+	}
+	var r contract.Result
+	if err := json.Unmarshal(b, &r); err != nil {
+		return r, fmt.Errorf("invalid result.json: %w", err)
+	}
+	if r.ContractVersion != contract.Version {
+		return r, fmt.Errorf("unsupported result contract version %q", r.ContractVersion)
+	}
+	for _, f := range r.OutputFiles {
+		clean := filepath.Clean(filepath.FromSlash(f.Path))
+		if filepath.IsAbs(clean) || clean == "output" || !strings.HasPrefix(clean, "output"+string(os.PathSeparator)) {
+			return r, fmt.Errorf("invalid output path %q", f.Path)
+		}
+		if _, err := os.Stat(filepath.Join(workspace, clean)); err != nil {
+			return r, fmt.Errorf("declared output missing %q", f.Path)
+		}
+	}
+	return r, nil
+}
+func copyFile(source, destination string) error {
+	in, err := os.Open(source)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	out, err := os.Create(destination)
+	if err != nil {
+		return err
+	}
+	defer out.Close()
+	_, err = io.Copy(out, in)
+	return err
+}
