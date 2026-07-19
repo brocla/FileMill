@@ -14,10 +14,10 @@ func TestValidSignature(t *testing.T) {
 	mac := hmac.New(sha256.New, []byte(key))
 	mac.Write([]byte(timestamp + token))
 	signature := hex.EncodeToString(mac.Sum(nil))
-	if !valid(key, timestamp, token, signature) {
+	if !authenticSignature(key, timestamp, token, signature) {
 		t.Fatal("expected valid signature")
 	}
-	if valid(key, timestamp, token, "forged") {
+	if authenticSignature(key, timestamp, token, "forged") {
 		t.Fatal("accepted forged signature")
 	}
 }
@@ -26,7 +26,7 @@ func TestRejectsStaleSignature(t *testing.T) {
 	key, timestamp, token := "signing-key", "1", "token-value"
 	mac := hmac.New(sha256.New, []byte(key))
 	mac.Write([]byte(timestamp + token))
-	if valid(key, timestamp, token, hex.EncodeToString(mac.Sum(nil))) {
+	if authenticSignature(key, timestamp, token, hex.EncodeToString(mac.Sum(nil))) {
 		t.Fatal("accepted stale signature")
 	}
 }

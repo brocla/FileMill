@@ -88,13 +88,13 @@ func TestEndToEndThroughWorkerlist(t *testing.T) {
 	defer fake.Close()
 
 	s := &Service{
-		app:      a,
-		sign:     "test-signing-key",
+		engine:   a,
+		signKey:  "test-signing-key",
 		domain:   "mill.test",
 		from:     "filemill@mill.test",
 		routes:   map[string]string{"workerlist@mill.keywind.cc": "workerlist"},
 		allowed:  map[string]bool{},
-		max:      20 << 20,
+		maxBytes: 20 << 20,
 		sendBase: fake.URL,
 		log:      log.New(io.Discard, "", 0),
 	}
@@ -104,14 +104,14 @@ func TestEndToEndThroughWorkerlist(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ts, token, sig := signedFields(s.sign)
+	ts, token, sig := signedFields(s.signKey)
 	var body bytes.Buffer
 	mw := multipart.NewWriter(&body)
 	for k, v := range map[string]string{
 		"timestamp": ts, "token": token, "signature": sig,
-		"recipient": "workerlist@mill.keywind.cc",
-		"sender":    "kevin@example.com",
-		"subject":   "Booth schedule",
+		"recipient":  "workerlist@mill.keywind.cc",
+		"sender":     "kevin@example.com",
+		"subject":    "Booth schedule",
 		"Message-Id": "<orig-123@example.com>",
 	} {
 		_ = mw.WriteField(k, v)
@@ -138,8 +138,8 @@ func TestEndToEndThroughWorkerlist(t *testing.T) {
 	}
 
 	// Deliver the reply now that the job is terminal.
-	if err := s.deliverOnce(); err != nil {
-		t.Fatalf("deliverOnce: %v", err)
+	if err := s.deliverPending(); err != nil {
+		t.Fatalf("deliverPending: %v", err)
 	}
 
 	// The reply must thread to the original and carry the produced spreadsheet.
