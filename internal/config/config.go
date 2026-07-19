@@ -38,12 +38,10 @@ func Load(path string) (Config, error) {
 			return Config{}, fmt.Errorf("duplicate transformer operation %q", t.Operation)
 		}
 		seen[t.Operation] = true
-		for j, part := range t.Command {
-			if j == 0 || (len(t.Command) > 1 && j == 1) {
-				if !filepath.IsAbs(part) {
-					t.Command[j] = filepath.Join(base, part)
-				}
-			}
+		// The first command item is the executable. Remaining items are literal
+		// arguments, such as Python's "-3" switch and a transformer script path.
+		if !filepath.IsAbs(t.Command[0]) {
+			t.Command[0] = filepath.Join(base, t.Command[0])
 		}
 	}
 	return cfg, nil

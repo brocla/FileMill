@@ -1,0 +1,4 @@
+routes:
+  workerlist@mill.keywind.cc: workerlist
+allowed_senders: []
+max_attachment_bytes: 20971520

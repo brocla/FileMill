@@ -27,6 +27,7 @@ type App struct {
 	log        *log.Logger
 	logFile    *os.File
 }
+type OutputFile struct{ Name, Path string }
 
 func Open(root string) (*App, error) {
 	data := filepath.Join(root, "data")
@@ -95,6 +96,27 @@ func (a *App) Submit(operation, source string) (string, error) {
 	return id, nil
 }
 func (a *App) Job(id string) (store.Job, error) { return a.store.Get(id) }
+func (a *App) Outputs(id string) ([]OutputFile, error) {
+	r, err := readResult(filepath.Join(a.data, "jobs", id, "result.json"), filepath.Join(a.data, "jobs", id))
+	if err != nil {
+		return nil, err
+	}
+	out := make([]OutputFile, 0, len(r.OutputFiles))
+	for _, f := range r.OutputFiles {
+		out = append(out, OutputFile{Name: f.Name, Path: filepath.Join(a.data, "jobs", id, filepath.FromSlash(f.Path))})
+	}
+	return out, nil
+}
+func (a *App) BeginEmail(messageID, sender, recipient, subject string) (int64, bool, error) {
+	return a.store.BeginEmail(messageID, sender, recipient, subject)
+}
+func (a *App) SetEmailExpected(id int64, count int) error    { return a.store.SetEmailExpected(id, count) }
+func (a *App) EmailHasJob(id int64, index int) (bool, error) { return a.store.EmailHasJob(id, index) }
+func (a *App) AddEmailJob(id int64, index int, jobID string) error {
+	return a.store.AddEmailJob(id, index, jobID)
+}
+func (a *App) PendingEmails() ([]store.EmailSubmission, error) { return a.store.PendingEmails() }
+func (a *App) MarkEmailDelivered(id int64) error               { return a.store.MarkEmailDelivered(id) }
 func (a *App) Run(ctx context.Context, once bool) error {
 	a.log.Printf("worker started once=%t", once)
 	for {

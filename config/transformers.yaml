@@ -4,3 +4,10 @@ transformers:
       - "bin/copy-rename.exe"
     extensions:
       - txt
+
+  - operation: workerlist
+    command:
+      - 'C:\Users\micro\source\repos\workerlist\.venv\Scripts\python.exe'
+      - 'C:\Users\micro\source\repos\workerlist\workerlist.py'
+    extensions:
+      - pdf

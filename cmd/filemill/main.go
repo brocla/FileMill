@@ -3,12 +3,15 @@ package main
 import (
 	"context"
 	"fmt"
+	"log"
+	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
 	"syscall"
 
 	"filemill/internal/app"
+	"filemill/internal/mailgun"
 )
 
 func main() {
@@ -56,6 +59,26 @@ func main() {
 		}
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		defer stop()
+		if !once {
+			mail, err := mailgun.Load(root, application, log.New(os.Stderr, "mailgun ", log.LstdFlags))
+			if err != nil {
+				fatal(err)
+			}
+			if mail != nil {
+				server := &http.Server{Addr: os.Getenv("LISTEN_ADDR"), Handler: mail.Handler()}
+				if server.Addr == "" {
+					server.Addr = ":8080"
+				}
+				go func() {
+					if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+						log.Printf("mailgun server: %v", err)
+					}
+				}()
+				go mail.Deliver(ctx)
+			} else {
+				log.Print("mailgun integration disabled: no Mailgun environment variables set")
+			}
+		}
 		if err := application.Run(ctx, once); err != nil {
 			fatal(err)
 		}

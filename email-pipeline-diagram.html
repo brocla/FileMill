@@ -1,0 +1,250 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>FileMill Email Pipeline — Block Diagram</title>
+<style>
+  :root {
+    --cf-orange: #f38020;
+    --mg-red: #c02128;
+    --fm-blue: #2563eb;
+    --ink: #1e293b;
+    --muted: #64748b;
+    --line: #94a3b8;
+    --bg-box: #ffffff;
+    --bg-page: #f1f5f9;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    padding: 40px 20px 60px;
+    background: var(--bg-page);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+    color: var(--ink);
+  }
+  h1 {
+    text-align: center;
+    font-size: 22px;
+    margin: 0 0 4px;
+  }
+  p.subtitle {
+    text-align: center;
+    color: var(--muted);
+    font-size: 14px;
+    margin: 0 0 32px;
+  }
+  .diagram-wrap {
+    max-width: 980px;
+    margin: 0 auto;
+    background: var(--bg-box);
+    border: 1px solid #e2e8f0;
+    border-radius: 12px;
+    padding: 24px;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.06);
+  }
+  .legend {
+    max-width: 980px;
+    margin: 32px auto 0;
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 16px;
+  }
+  .legend-card {
+    background: var(--bg-box);
+    border: 1px solid #e2e8f0;
+    border-radius: 10px;
+    padding: 16px 18px;
+  }
+  .legend-card h3 {
+    margin: 0 0 8px;
+    font-size: 14px;
+  }
+  .legend-card ol {
+    margin: 0;
+    padding-left: 18px;
+    font-size: 13px;
+    line-height: 1.6;
+    color: var(--ink);
+  }
+  .legend-card ol li span.mono {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    background: #f1f5f9;
+    padding: 1px 5px;
+    border-radius: 4px;
+    font-size: 12px;
+  }
+  .roles {
+    max-width: 980px;
+    margin: 16px auto 0;
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 16px;
+  }
+  .role-card {
+    border-radius: 10px;
+    padding: 14px 18px;
+    font-size: 13px;
+    line-height: 1.6;
+  }
+  .role-card.cf { background: #fff7ed; border: 1px solid #fdba74; }
+  .role-card.mg { background: #fef2f2; border: 1px solid #fca5a5; }
+  .role-card h3 { margin: 0 0 6px; font-size: 14px; }
+  .role-card.cf h3 { color: #c2410c; }
+  .role-card.mg h3 { color: #b91c1c; }
+</style>
+</head>
+<body>
+
+<h1>FileMill Email Pipeline</h1>
+<p class="subtitle">How Cloudflare, Mailgun, the Tunnel, mill.keywind.cc, and FileMill fit together</p>
+
+<div class="diagram-wrap">
+<svg viewBox="0 0 940 900" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system, Segoe UI, Helvetica, Arial, sans-serif">
+
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#475569"/>
+    </marker>
+    <marker id="arrowReturn" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#2563eb"/>
+    </marker>
+  </defs>
+
+  <!-- Sender box -->
+  <rect x="360" y="10" width="220" height="60" rx="10" fill="#f8fafc" stroke="#94a3b8" stroke-width="1.5"/>
+  <text x="470" y="34" text-anchor="middle" font-size="14" font-weight="600" fill="#1e293b">Sender's email client</text>
+  <text x="470" y="52" text-anchor="middle" font-size="11" fill="#64748b">sends + eventually receives</text>
+
+  <!-- Arrow 1: sender -> Cloudflare DNS zone -->
+  <line x1="470" y1="70" x2="470" y2="110" stroke="#475569" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <text x="490" y="94" font-size="11.5" fill="#334155">1. SMTP to someone@mill.keywind.cc</text>
+
+  <!-- Cloudflare DNS zone box -->
+  <rect x="150" y="112" width="640" height="110" rx="10" fill="#fff7ed" stroke="#f38020" stroke-width="1.5"/>
+  <text x="470" y="134" text-anchor="middle" font-size="14" font-weight="700" fill="#c2410c">Cloudflare DNS — keywind.cc zone</text>
+
+  <rect x="175" y="150" width="270" height="58" rx="8" fill="#ffffff" stroke="#fdba74"/>
+  <text x="310" y="170" text-anchor="middle" font-size="12" font-weight="600" fill="#1e293b">mill.keywind.cc</text>
+  <text x="310" y="186" text-anchor="middle" font-size="10.5" fill="#64748b">MX / SPF / DKIM / DMARC</text>
+  <text x="310" y="199" text-anchor="middle" font-size="10.5" fill="#64748b">→ points to Mailgun</text>
+
+  <rect x="495" y="150" width="270" height="58" rx="8" fill="#ffffff" stroke="#fdba74"/>
+  <text x="630" y="170" text-anchor="middle" font-size="12" font-weight="600" fill="#1e293b">notify.keywind.cc</text>
+  <text x="630" y="186" text-anchor="middle" font-size="10.5" fill="#64748b">CNAME → &lt;tunnel-id&gt;.cfargotunnel.com</text>
+  <text x="630" y="199" text-anchor="middle" font-size="10.5" fill="#64748b">→ points to the Tunnel</text>
+
+  <!-- Arrow: DNS -> Mailgun -->
+  <line x1="310" y1="222" x2="310" y2="262" stroke="#475569" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <text x="322" y="248" font-size="11" fill="#334155">MX lookup</text>
+
+  <!-- Mailgun box -->
+  <rect x="150" y="264" width="320" height="130" rx="10" fill="#fef2f2" stroke="#c02128" stroke-width="1.5"/>
+  <text x="310" y="288" text-anchor="middle" font-size="14" font-weight="700" fill="#b91c1c">Mailgun</text>
+  <text x="310" y="308" text-anchor="middle" font-size="11" fill="#334155">Receives via SMTP (mxa/mxb.mailgun.org)</text>
+  <text x="310" y="325" text-anchor="middle" font-size="11" fill="#334155">Route: match_recipient(".*@mill.keywind.cc")</text>
+  <text x="310" y="342" text-anchor="middle" font-size="11" fill="#334155">Action: store() + notify()</text>
+  <text x="310" y="365" text-anchor="middle" font-size="10.5" fill="#64748b">also: outbound Send API</text>
+  <text x="310" y="380" text-anchor="middle" font-size="10.5" fill="#64748b">(reply path, step 5)</text>
+
+  <!-- Arrow 2: Mailgun -> Cloudflare Tunnel edge, via notify.keywind.cc -->
+  <path d="M 470 330 C 560 330, 560 250, 630 222" fill="none" stroke="#475569" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <text x="560" y="270" font-size="11.5" fill="#334155">2. POST https://notify.keywind.cc/mailgun-webhook</text>
+  <text x="560" y="284" font-size="10.5" fill="#64748b">multipart/form-data, HMAC-signed</text>
+
+  <!-- Cloudflare Tunnel edge box -->
+  <rect x="530" y="416" width="260" height="90" rx="10" fill="#fff7ed" stroke="#f38020" stroke-width="1.5"/>
+  <text x="660" y="440" text-anchor="middle" font-size="13.5" font-weight="700" fill="#c2410c">Cloudflare Edge</text>
+  <text x="660" y="458" text-anchor="middle" font-size="11" fill="#334155">resolves notify.keywind.cc</text>
+  <text x="660" y="474" text-anchor="middle" font-size="11" fill="#334155">routes into the Tunnel connection</text>
+
+  <!-- connect notify box down to edge box -->
+  <line x1="630" y1="208" x2="660" y2="416" stroke="#cbd5e1" stroke-width="1.2" stroke-dasharray="4 3"/>
+
+  <!-- Arrow 3: Cloudflare edge -> FileMill laptop, via Tunnel -->
+  <line x1="660" y1="506" x2="660" y2="546" stroke="#475569" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <text x="672" y="530" font-size="11.5" fill="#334155">3. Cloudflare Tunnel</text>
+  <text x="672" y="544" font-size="10.5" fill="#64748b">(cloudflared, Windows service)</text>
+
+  <!-- Laptop box, containing Tunnel client + FileMill -->
+  <rect x="150" y="548" width="640" height="180" rx="10" fill="#eff6ff" stroke="#2563eb" stroke-width="1.5"/>
+  <text x="470" y="572" text-anchor="middle" font-size="14" font-weight="700" fill="#1d4ed8">Laptop (not always-on, no static IP)</text>
+
+  <rect x="175" y="588" width="180" height="120" rx="8" fill="#ffffff" stroke="#93c5fd"/>
+  <text x="265" y="610" text-anchor="middle" font-size="12" font-weight="600" fill="#1e293b">cloudflared</text>
+  <text x="265" y="628" text-anchor="middle" font-size="10.5" fill="#64748b">persistent outbound</text>
+  <text x="265" y="642" text-anchor="middle" font-size="10.5" fill="#64748b">connection to Cloudflare</text>
+  <text x="265" y="660" text-anchor="middle" font-size="10.5" fill="#64748b">no inbound ports opened</text>
+  <text x="265" y="682" text-anchor="middle" font-size="10.5" fill="#64748b">forwards to</text>
+  <text x="265" y="696" text-anchor="middle" font-size="10.5" font-weight="600" fill="#1e293b">localhost:8080 (HTTP)</text>
+
+  <line x1="355" y1="648" x2="395" y2="648" stroke="#475569" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+  <rect x="395" y="588" width="365" height="120" rx="8" fill="#ffffff" stroke="#93c5fd"/>
+  <text x="577" y="610" text-anchor="middle" font-size="12" font-weight="600" fill="#1e293b">FileMill (Go process)</text>
+  <text x="577" y="628" text-anchor="middle" font-size="10.5" fill="#64748b">/mailgun-webhook handler:</text>
+  <text x="577" y="644" text-anchor="middle" font-size="10.5" fill="#64748b">verify signature → parse multipart → app.Submit(op, file)</text>
+  <text x="577" y="660" text-anchor="middle" font-size="10.5" fill="#64748b">job store + worker loop → transformer subprocess</text>
+  <text x="577" y="676" text-anchor="middle" font-size="10.5" fill="#64748b">runs inside the existing "filemill run"</text>
+  <text x="577" y="692" text-anchor="middle" font-size="10.5" fill="#64748b">(started at logon via Task Scheduler)</text>
+
+  <!-- Arrow 4: FileMill -> Mailgun send API (return path) -->
+  <path d="M 760 648 C 900 648, 900 330, 470 330" fill="none" stroke="#2563eb" stroke-width="1.5" stroke-dasharray="0" marker-end="url(#arrowReturn)"/>
+  <text x="905" y="500" font-size="11.5" fill="#1d4ed8" transform="rotate(90 905 500)" text-anchor="middle">4. reply via Mailgun Send API (HTTPS)</text>
+
+  <!-- Arrow 5: Mailgun -> sender -->
+  <path d="M 310 264 C 250 200, 300 90, 360 40" fill="none" stroke="#2563eb" stroke-width="1.5" marker-end="url(#arrowReturn)"/>
+  <text x="185" y="150" font-size="11.5" fill="#1d4ed8">5. SMTP reply,</text>
+  <text x="185" y="164" font-size="11.5" fill="#1d4ed8">threaded via In-Reply-To</text>
+
+  <!-- Legend note -->
+  <text x="470" y="800" text-anchor="middle" font-size="11" fill="#94a3b8">Orange = Cloudflare · Red = Mailgun · Blue = FileMill / reply path</text>
+
+</svg>
+</div>
+
+<div class="legend">
+  <div class="legend-card">
+    <h3>Outbound leg (sending the file)</h3>
+    <ol>
+      <li>Sender emails an attachment to an address at <span class="mono">mill.keywind.cc</span>.</li>
+      <li>Cloudflare DNS resolves that domain's MX records to Mailgun, which receives the mail via SMTP.</li>
+      <li>Mailgun's Route matches the recipient and fires <span class="mono">store()</span> + <span class="mono">notify()</span>, POSTing the fully parsed message (multipart/form-data, HMAC-signed) to <span class="mono">https://notify.keywind.cc/mailgun-webhook</span>.</li>
+    </ol>
+  </div>
+  <div class="legend-card">
+    <h3>Delivery to the laptop</h3>
+    <ol start="3">
+      <li>Cloudflare's edge resolves <span class="mono">notify.keywind.cc</span> and routes the request through the Cloudflare Tunnel — a persistent outbound connection <span class="mono">cloudflared</span> maintains from the laptop, so no inbound ports are ever opened.</li>
+      <li>The tunnel forwards the request to FileMill's local HTTP server on <span class="mono">localhost:8080</span>, which verifies the signature, parses the payload, and submits a job into FileMill's existing pipeline.</li>
+    </ol>
+  </div>
+  <div class="legend-card">
+    <h3>Return leg (sending the result back)</h3>
+    <ol start="5">
+      <li>Once the job completes, FileMill calls Mailgun's Send API directly over HTTPS (no tunnel needed for outbound — this leg starts from the laptop itself) with the transformed file attached.</li>
+      <li>Mailgun relays the reply over SMTP back to the original sender, threaded via <span class="mono">In-Reply-To</span>/<span class="mono">References</span> so it appears as a reply, not a new message.</li>
+    </ol>
+  </div>
+  <div class="legend-card">
+    <h3>Why the tunnel exists at all</h3>
+    <ol>
+      <li>FileMill runs on a personal laptop — no static IP, no always-on hosting, often behind NAT.</li>
+      <li>Mailgun's <span class="mono">notify()</span> needs a real public HTTPS URL to POST to.</li>
+      <li>Cloudflare Tunnel bridges that gap without port-forwarding, and runs as a Windows service so it survives reboots independently of FileMill's own persistence.</li>
+    </ol>
+  </div>
+</div>
+
+<div class="roles">
+  <div class="role-card cf">
+    <h3>Cloudflare's two roles here</h3>
+    DNS host for the <span class="mono">keywind.cc</span> zone (holds Mailgun's MX/SPF/DKIM/DMARC records for mill.keywind.cc, and the CNAME for notify.keywind.cc) — and separately, the Tunnel relay that exposes the laptop's local port publicly.
+  </div>
+  <div class="role-card mg">
+    <h3>Mailgun's two roles here</h3>
+    Inbound: receives mail via MX, matches the Route, parses and pushes it via <span class="mono">notify()</span>. Outbound: a completely separate API call (Send API) FileMill uses to deliver the reply — same account, unrelated code path.
+  </div>
+</div>
+
+</body>
+</html>
