@@ -40,6 +40,18 @@ func Open(path string) (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
+	// SQLite allows only one writer. Serialize all access through a single
+	// connection so the webhook handler, worker, and delivery goroutines can't
+	// collide with SQLITE_BUSY. busy_timeout makes a lock wait briefly rather
+	// than fail (covering a second process too, e.g. `submit` during `run`);
+	// WAL keeps reads from blocking the writer.
+	db.SetMaxOpenConns(1)
+	for _, pragma := range []string{"PRAGMA busy_timeout=5000", "PRAGMA journal_mode=WAL"} {
+		if _, err := db.Exec(pragma); err != nil {
+			db.Close()
+			return nil, err
+		}
+	}
 	s := &Store{db: db}
 	_, err = db.Exec(`CREATE TABLE IF NOT EXISTS jobs (
  id TEXT PRIMARY KEY, operation TEXT NOT NULL, status TEXT NOT NULL, input_name TEXT NOT NULL,
@@ -91,17 +103,30 @@ func (s *Store) AddEmailJob(id int64, index int, jobID string) error {
 	return err
 }
 func (s *Store) PendingEmails() ([]EmailSubmission, error) {
+	// Read the submissions fully and close the result set before querying each
+	// one's jobs. Holding the outer rows open across the per-submission queries
+	// would deadlock under SetMaxOpenConns(1).
 	rows, err := s.db.Query("SELECT id,message_id,sender,recipient,subject,expected_jobs FROM email_submissions WHERE delivered_at IS NULL AND expected_jobs>0")
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	var out []EmailSubmission
+	var subs []EmailSubmission
 	for rows.Next() {
 		var e EmailSubmission
 		if err := rows.Scan(&e.ID, &e.MessageID, &e.Sender, &e.Recipient, &e.Subject, &e.Expected); err != nil {
+			rows.Close()
 			return nil, err
 		}
+		subs = append(subs, e)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, err
+	}
+	rows.Close()
+
+	var out []EmailSubmission
+	for _, e := range subs {
 		jr, err := s.db.Query("SELECT j.id,j.operation,j.status,j.input_name,j.message,j.created_at,esj.attachment_index FROM email_submission_jobs esj JOIN jobs j ON j.id=esj.job_id WHERE esj.submission_id=? ORDER BY esj.attachment_index", e.ID)
 		if err != nil {
 			return nil, err
@@ -116,12 +141,16 @@ func (s *Store) PendingEmails() ([]EmailSubmission, error) {
 			x.Job.CreatedAt, _ = time.Parse(time.RFC3339Nano, c)
 			e.Jobs = append(e.Jobs, x)
 		}
+		if err := jr.Err(); err != nil {
+			jr.Close()
+			return nil, err
+		}
 		jr.Close()
 		if len(e.Jobs) == e.Expected {
 			out = append(out, e)
 		}
 	}
-	return out, rows.Err()
+	return out, nil
 }
 func (s *Store) MarkEmailDelivered(id int64) error {
 	_, err := s.db.Exec("UPDATE email_submissions SET delivered_at=? WHERE id=?", time.Now().UTC().Format(time.RFC3339Nano), id)
