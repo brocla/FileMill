@@ -1,0 +1,9 @@
+# Normalize line endings: store LF in git and check out LF on every platform,
+# so gofmt and other tools don't trip over CRLF on Windows.
+* text=auto eol=lf
+
+# Binary files: never touch line endings.
+*.png binary
+*.xlsx binary
+*.pdf binary
+*.exe binary
