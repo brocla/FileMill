@@ -11,6 +11,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"filemill/internal/store"
 )
 
 // deliveryPollInterval is how often the delivery loop checks for submission
@@ -47,7 +49,7 @@ func (s *Service) deliverPending(ctx context.Context) error {
 	for _, sub := range subs {
 		terminal := true
 		for _, item := range sub.Jobs {
-			if item.Job.Status == "queued" || item.Job.Status == "running" {
+			if item.Job.Status == store.StatusQueued || item.Job.Status == store.StatusRunning {
 				terminal = false
 				break
 			}
@@ -60,7 +62,7 @@ func (s *Service) deliverPending(ctx context.Context) error {
 		var outputs []string
 		for _, item := range sub.Jobs {
 			lines = append(lines, fmt.Sprintf("%s: %s", item.Job.InputName, item.Job.Message))
-			if item.Job.Status != "succeeded" {
+			if item.Job.Status != store.StatusSucceeded {
 				continue
 			}
 			files, err := s.engine.Outputs(item.Job.ID)
