@@ -3,12 +3,16 @@ package main
 import (
 	"context"
 	"fmt"
+	"io"
+	"log"
+	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
 	"syscall"
 
 	"filemill/internal/app"
+	"filemill/internal/mailgun"
 )
 
 func main() {
@@ -56,6 +60,28 @@ func main() {
 		}
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		defer stop()
+		if !once {
+			mailLog := log.New(io.MultiWriter(os.Stderr, application.LogWriter()), "mailgun ", log.LstdFlags|log.LUTC)
+			mail, err := mailgun.Load(root, application, mailLog)
+			if err != nil {
+				fatal(err)
+			}
+			if mail != nil {
+				server := &http.Server{Addr: os.Getenv("LISTEN_ADDR"), Handler: mail.Handler()}
+				if server.Addr == "" {
+					server.Addr = ":8080"
+				}
+				mailLog.Printf("webhook listening on %s; delivery loop started", server.Addr)
+				go func() {
+					if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+						mailLog.Printf("server: %v", err)
+					}
+				}()
+				go mail.Deliver(ctx)
+			} else {
+				mailLog.Print("integration disabled: no Mailgun environment variables set")
+			}
+		}
 		if err := application.Run(ctx, once); err != nil {
 			fatal(err)
 		}
