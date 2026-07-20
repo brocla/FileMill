@@ -10,6 +10,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"syscall"
+	"time"
 
 	"filemill/internal/app"
 	"filemill/internal/mailgun"
@@ -68,6 +69,7 @@ func main() {
 		}
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		defer stop()
+		var server *http.Server
 		if !once {
 			mailLog := log.New(io.MultiWriter(os.Stderr, application.LogWriter()), "mailgun ", log.LstdFlags|log.LUTC)
 			mail, err := mailgun.Load(root, application, mailLog)
@@ -75,7 +77,7 @@ func main() {
 				fatal(err)
 			}
 			if mail != nil {
-				server := &http.Server{Addr: os.Getenv("LISTEN_ADDR"), Handler: mail.Handler()}
+				server = &http.Server{Addr: os.Getenv("LISTEN_ADDR"), Handler: mail.Handler()}
 				if server.Addr == "" {
 					server.Addr = ":8080"
 				}
@@ -90,8 +92,16 @@ func main() {
 				mailLog.Print("integration disabled: no Mailgun environment variables set")
 			}
 		}
-		if err := application.Run(ctx, once); err != nil {
-			fatal(err)
+		runErr := application.Run(ctx, once)
+		if server != nil {
+			// Drain in-flight webhook requests on shutdown (Ctrl+C). Intake is
+			// idempotent, so a request cut off here is safely retried by Mailgun.
+			shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), 10*time.Second)
+			_ = server.Shutdown(shutdownCtx)
+			cancelShutdown()
+		}
+		if runErr != nil {
+			fatal(runErr)
 		}
 	default:
 		usage()
