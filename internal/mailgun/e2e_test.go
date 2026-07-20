@@ -138,7 +138,7 @@ func TestEndToEndThroughWorkerlist(t *testing.T) {
 	}
 
 	// Deliver the reply now that the job is terminal.
-	if err := s.deliverPending(); err != nil {
+	if err := s.deliverPending(context.Background()); err != nil {
 		t.Fatalf("deliverPending: %v", err)
 	}
 

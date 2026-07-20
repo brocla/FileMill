@@ -10,12 +10,21 @@ import (
 	"os/signal"
 	"path/filepath"
 	"syscall"
+	"time"
 
 	"filemill/internal/app"
 	"filemill/internal/mailgun"
 )
 
+// version is the FileMill build version. Overridable at build time with
+// -ldflags "-X main.version=$(git describe --tags)"; defaults to the tagged release.
+var version = "0.1.0"
+
 func main() {
+	if len(os.Args) >= 2 && (os.Args[1] == "--version" || os.Args[1] == "-v" || os.Args[1] == "version") {
+		fmt.Println("filemill " + version)
+		return
+	}
 	if len(os.Args) < 2 {
 		usage()
 		os.Exit(2)
@@ -60,6 +69,7 @@ func main() {
 		}
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		defer stop()
+		var server *http.Server
 		if !once {
 			mailLog := log.New(io.MultiWriter(os.Stderr, application.LogWriter()), "mailgun ", log.LstdFlags|log.LUTC)
 			mail, err := mailgun.Load(root, application, mailLog)
@@ -67,11 +77,11 @@ func main() {
 				fatal(err)
 			}
 			if mail != nil {
-				server := &http.Server{Addr: os.Getenv("LISTEN_ADDR"), Handler: mail.Handler()}
+				server = &http.Server{Addr: os.Getenv("LISTEN_ADDR"), Handler: mail.Handler()}
 				if server.Addr == "" {
 					server.Addr = ":8080"
 				}
-				mailLog.Printf("webhook listening on %s; delivery loop started", server.Addr)
+				mailLog.Printf("FileMill %s — webhook listening on %s; delivery loop started", version, server.Addr)
 				go func() {
 					if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 						mailLog.Printf("server: %v", err)
@@ -82,8 +92,16 @@ func main() {
 				mailLog.Print("integration disabled: no Mailgun environment variables set")
 			}
 		}
-		if err := application.Run(ctx, once); err != nil {
-			fatal(err)
+		runErr := application.Run(ctx, once)
+		if server != nil {
+			// Drain in-flight webhook requests on shutdown (Ctrl+C). Intake is
+			// idempotent, so a request cut off here is safely retried by Mailgun.
+			shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), 10*time.Second)
+			_ = server.Shutdown(shutdownCtx)
+			cancelShutdown()
+		}
+		if runErr != nil {
+			fatal(runErr)
 		}
 	default:
 		usage()
@@ -93,7 +111,7 @@ func main() {
 
 func usage() {
 	name := filepath.Base(os.Args[0])
-	fmt.Fprintf(os.Stderr, "Usage:\n  %s run [--once]\n  %s submit <operation> <file>\n  %s jobs get <job-id>\n", name, name, name)
+	fmt.Fprintf(os.Stderr, "Usage:\n  %s run [--once]\n  %s submit <operation> <file>\n  %s jobs get <job-id>\n  %s --version\n", name, name, name, name)
 }
 
 func fatal(err error) { fmt.Fprintln(os.Stderr, "filemill:", err); os.Exit(1) }

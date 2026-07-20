@@ -149,7 +149,7 @@ func (a *App) Run(ctx context.Context, once bool) error {
 func (a *App) execute(parent context.Context, j store.Job) {
 	t, ok := a.cfg.Find(j.Operation)
 	if !ok {
-		a.finish(j.ID, "failed", "registered transformer no longer exists")
+		a.finish(j.ID, store.StatusFailed, "registered transformer no longer exists")
 		return
 	}
 	workspace := filepath.Join(a.data, "jobs", j.ID)
@@ -163,7 +163,7 @@ func (a *App) execute(parent context.Context, j store.Job) {
 		a.log.Printf("job=%s transformer_output=%s", j.ID, strings.TrimSpace(string(output)))
 	}
 	if ctx.Err() == context.DeadlineExceeded {
-		a.finish(j.ID, "failed", "transformer timed out after 10 minutes")
+		a.finish(j.ID, store.StatusFailed, "transformer timed out after 10 minutes")
 		return
 	}
 	result, readErr := readResult(filepath.Join(workspace, "result.json"), workspace)
@@ -172,18 +172,18 @@ func (a *App) execute(parent context.Context, j store.Job) {
 		if readErr == nil && result.Message != "" {
 			msg = result.Message
 		}
-		a.finish(j.ID, "failed", msg)
+		a.finish(j.ID, store.StatusFailed, msg)
 		return
 	}
 	if readErr != nil {
-		a.finish(j.ID, "failed", readErr.Error())
+		a.finish(j.ID, store.StatusFailed, readErr.Error())
 		return
 	}
 	if !result.Success {
-		a.finish(j.ID, "failed", result.Message)
+		a.finish(j.ID, store.StatusFailed, result.Message)
 		return
 	}
-	a.finish(j.ID, "succeeded", result.Message)
+	a.finish(j.ID, store.StatusSucceeded, result.Message)
 }
 func (a *App) finish(id, status, message string) {
 	if err := a.store.Complete(id, status, message); err != nil {

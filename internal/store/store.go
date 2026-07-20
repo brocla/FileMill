@@ -25,6 +25,16 @@ type EmailJob struct {
 	Job   Job
 }
 
+// Job status values. Lifecycle: queued -> running -> succeeded|failed.
+// interrupted marks a job that was still running when the process stopped.
+const (
+	StatusQueued      = "queued"
+	StatusRunning     = "running"
+	StatusSucceeded   = "succeeded"
+	StatusFailed      = "failed"
+	StatusInterrupted = "interrupted"
+)
+
 func Open(path string) (*Store, error) {
 	db, err := sql.Open("sqlite", path)
 	if err != nil {
@@ -51,7 +61,7 @@ func Open(path string) (*Store, error) {
 		db.Close()
 		return nil, err
 	}
-	if _, err := db.Exec("UPDATE jobs SET status='interrupted', completed_at=? WHERE status='running'", time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
+	if _, err := db.Exec("UPDATE jobs SET status=?, completed_at=? WHERE status=?", StatusInterrupted, time.Now().UTC().Format(time.RFC3339Nano), StatusRunning); err != nil {
 		db.Close()
 		return nil, err
 	}
@@ -119,7 +129,7 @@ func (s *Store) MarkEmailDelivered(id int64) error {
 }
 func (s *Store) Close() error { return s.db.Close() }
 func (s *Store) Create(j Job) error {
-	_, err := s.db.Exec("INSERT INTO jobs(id, operation, status, input_name, created_at) VALUES(?,?,?,?,?)", j.ID, j.Operation, "queued", j.InputName, j.CreatedAt.UTC().Format(time.RFC3339Nano))
+	_, err := s.db.Exec("INSERT INTO jobs(id, operation, status, input_name, created_at) VALUES(?,?,?,?,?)", j.ID, j.Operation, StatusQueued, j.InputName, j.CreatedAt.UTC().Format(time.RFC3339Nano))
 	return err
 }
 func (s *Store) Next() (*Job, error) {
@@ -128,7 +138,7 @@ func (s *Store) Next() (*Job, error) {
 		return nil, err
 	}
 	defer tx.Rollback()
-	row := tx.QueryRow("SELECT id, operation, status, input_name, message, created_at FROM jobs WHERE status='queued' ORDER BY created_at LIMIT 1")
+	row := tx.QueryRow("SELECT id, operation, status, input_name, message, created_at FROM jobs WHERE status=? ORDER BY created_at LIMIT 1", StatusQueued)
 	var j Job
 	var created string
 	if err := row.Scan(&j.ID, &j.Operation, &j.Status, &j.InputName, &j.Message, &created); err == sql.ErrNoRows {
@@ -137,7 +147,7 @@ func (s *Store) Next() (*Job, error) {
 		return nil, err
 	}
 	j.CreatedAt, _ = time.Parse(time.RFC3339Nano, created)
-	res, err := tx.Exec("UPDATE jobs SET status='running', started_at=? WHERE id=? AND status='queued'", time.Now().UTC().Format(time.RFC3339Nano), j.ID)
+	res, err := tx.Exec("UPDATE jobs SET status=?, started_at=? WHERE id=? AND status=?", StatusRunning, time.Now().UTC().Format(time.RFC3339Nano), j.ID, StatusQueued)
 	if err != nil {
 		return nil, err
 	}
@@ -148,7 +158,7 @@ func (s *Store) Next() (*Job, error) {
 	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
-	j.Status = "running"
+	j.Status = StatusRunning
 	return &j, nil
 }
 func (s *Store) Complete(id, status, message string) error {
