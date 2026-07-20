@@ -51,7 +51,8 @@ type Service struct {
 	allowed  map[string]bool   // envelope senders permitted to submit (empty = all)
 	maxBytes int64             // per-attachment size limit
 
-	sendBase string // Mailgun Send API base URL; overridable in tests
+	sendBase string       // Mailgun Send API base URL; overridable in tests
+	client   *http.Client // outbound HTTP client (carries the send timeout)
 	log      *log.Logger
 }
 

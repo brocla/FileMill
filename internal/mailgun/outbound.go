@@ -25,7 +25,7 @@ func (s *Service) Deliver(ctx context.Context) {
 	ticker := time.NewTicker(deliveryPollInterval)
 	defer ticker.Stop()
 	for {
-		if err := s.deliverPending(); err != nil {
+		if err := s.deliverPending(ctx); err != nil {
 			s.log.Printf("delivery: %v", err)
 		}
 		select {
@@ -39,7 +39,7 @@ func (s *Service) Deliver(ctx context.Context) {
 // deliverPending sends a reply for every pending submission whose jobs have all
 // finished, marking each delivered only after Mailgun accepts it so a transient
 // send failure is retried on the next tick.
-func (s *Service) deliverPending() error {
+func (s *Service) deliverPending(ctx context.Context) error {
 	subs, err := s.engine.PendingEmails()
 	if err != nil {
 		return err
@@ -72,7 +72,7 @@ func (s *Service) deliverPending() error {
 			}
 		}
 
-		if err := s.send(sub.Sender, sub.Subject, sub.MessageID, strings.Join(lines, "\n"), outputs); err != nil {
+		if err := s.send(ctx, sub.Sender, sub.Subject, sub.MessageID, strings.Join(lines, "\n"), outputs); err != nil {
 			return err
 		}
 		if err := s.engine.MarkEmailDelivered(sub.ID); err != nil {
@@ -84,7 +84,7 @@ func (s *Service) deliverPending() error {
 
 // send posts one reply to Mailgun's Send API, threaded into the original
 // conversation and carrying the given output files as attachments.
-func (s *Service) send(to, subject, messageID, text string, outputs []string) error {
+func (s *Service) send(ctx context.Context, to, subject, messageID, text string, outputs []string) error {
 	var body bytes.Buffer
 	writer := multipart.NewWriter(&body)
 
@@ -116,20 +116,28 @@ func (s *Service) send(to, subject, messageID, text string, outputs []string) er
 	if base == "" {
 		base = mailgunAPI
 	}
-	req, err := http.NewRequest(http.MethodPost, fmt.Sprintf("%s/v3/%s/messages", base, s.domain), &body)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, fmt.Sprintf("%s/v3/%s/messages", base, s.domain), &body)
 	if err != nil {
 		return err
 	}
 	req.Header.Set("Content-Type", writer.FormDataContentType())
 	req.SetBasicAuth("api", s.apiKey)
 
-	resp, err := http.DefaultClient.Do(req)
+	client := s.client
+	if client == nil {
+		client = http.DefaultClient
+	}
+	resp, err := client.Do(req)
 	if err != nil {
 		return err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 300 {
-		return fmt.Errorf("mailgun send returned %s", resp.Status)
+		// Include a bounded slice of Mailgun's error body — it carries the
+		// actual reason (bad key, unverified domain, etc.), which a bare
+		// status code hides.
+		detail, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
+		return fmt.Errorf("mailgun send returned %s: %s", resp.Status, bytes.TrimSpace(detail))
 	}
 	return nil
 }

@@ -3,9 +3,11 @@ package mailgun
 import (
 	"fmt"
 	"log"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"filemill/internal/app"
 	"gopkg.in/yaml.v3"
@@ -14,6 +16,9 @@ import (
 const (
 	// defaultMaxBytes caps a single attachment when email.yaml does not.
 	defaultMaxBytes = 20 << 20 // 20 MiB
+	// defaultSendTimeoutSeconds bounds an outbound Mailgun send when email.yaml
+	// does not, so a hung connection can't stall the delivery loop forever.
+	defaultSendTimeoutSeconds = 30
 	// mailgunAPI is Mailgun's Send API host, used unless a Service overrides it.
 	mailgunAPI = "https://api.mailgun.net"
 )
@@ -21,9 +26,10 @@ const (
 // fileConfig mirrors config/email.yaml. Secrets live in the environment, not
 // this file, so it is safe to keep in version control.
 type fileConfig struct {
-	Routes  map[string]string `yaml:"routes"`
-	Allowed []string          `yaml:"allowed_senders"`
-	Max     int64             `yaml:"max_attachment_bytes"`
+	Routes      map[string]string `yaml:"routes"`
+	Allowed     []string          `yaml:"allowed_senders"`
+	Max         int64             `yaml:"max_attachment_bytes"`
+	SendTimeout int               `yaml:"send_timeout_seconds"`
 }
 
 // Load reads config/email.yaml and the Mailgun secrets from the environment.
@@ -55,6 +61,11 @@ func Load(root string, engine *app.App, logger *log.Logger) (*Service, error) {
 	if s.maxBytes == 0 {
 		s.maxBytes = defaultMaxBytes
 	}
+	sendTimeout := cfg.SendTimeout
+	if sendTimeout <= 0 {
+		sendTimeout = defaultSendTimeoutSeconds
+	}
+	s.client = &http.Client{Timeout: time.Duration(sendTimeout) * time.Second}
 	for address, operation := range cfg.Routes {
 		s.routes[strings.ToLower(address)] = operation
 	}
