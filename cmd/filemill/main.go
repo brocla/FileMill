@@ -15,7 +15,15 @@ import (
 	"filemill/internal/mailgun"
 )
 
+// version is the FileMill build version. Overridable at build time with
+// -ldflags "-X main.version=$(git describe --tags)"; defaults to the tagged release.
+var version = "0.1.0"
+
 func main() {
+	if len(os.Args) >= 2 && (os.Args[1] == "--version" || os.Args[1] == "-v" || os.Args[1] == "version") {
+		fmt.Println("filemill " + version)
+		return
+	}
 	if len(os.Args) < 2 {
 		usage()
 		os.Exit(2)
@@ -71,7 +79,7 @@ func main() {
 				if server.Addr == "" {
 					server.Addr = ":8080"
 				}
-				mailLog.Printf("webhook listening on %s; delivery loop started", server.Addr)
+				mailLog.Printf("FileMill %s — webhook listening on %s; delivery loop started", version, server.Addr)
 				go func() {
 					if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 						mailLog.Printf("server: %v", err)
@@ -93,7 +101,7 @@ func main() {
 
 func usage() {
 	name := filepath.Base(os.Args[0])
-	fmt.Fprintf(os.Stderr, "Usage:\n  %s run [--once]\n  %s submit <operation> <file>\n  %s jobs get <job-id>\n", name, name, name)
+	fmt.Fprintf(os.Stderr, "Usage:\n  %s run [--once]\n  %s submit <operation> <file>\n  %s jobs get <job-id>\n  %s --version\n", name, name, name, name)
 }
 
 func fatal(err error) { fmt.Fprintln(os.Stderr, "filemill:", err); os.Exit(1) }
