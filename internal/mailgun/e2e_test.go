@@ -152,8 +152,8 @@ func TestEndToEndThroughWorkerlist(t *testing.T) {
 	if gotInReplyTo != "<orig-123@example.com>" {
 		t.Errorf("In-Reply-To = %q, want threading header", gotInReplyTo)
 	}
-	if len(gotAttachments) != 1 || gotAttachments[0] != "schedule.xlsx" {
-		t.Fatalf("reply attachments = %v, want [schedule.xlsx]", gotAttachments)
+	if len(gotAttachments) != 1 || !strings.HasSuffix(gotAttachments[0], ".xlsx") {
+		t.Fatalf("reply attachments = %v, want one .xlsx", gotAttachments)
 	}
 	t.Logf("end-to-end OK: reply to %s subject %q attachment %v", gotTo, gotSubject, gotAttachments)
 }

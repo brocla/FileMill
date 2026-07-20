@@ -126,7 +126,18 @@ func (a *App) Run(ctx context.Context, once bool) error {
 	for {
 		j, err := a.store.Next()
 		if err != nil {
-			return err
+			if once {
+				return err
+			}
+			// A transient store error (e.g. SQLITE_BUSY under load) must not
+			// take down the worker: log it, back off, and retry.
+			a.log.Printf("worker claim error: %v", err)
+			select {
+			case <-ctx.Done():
+				return nil
+			case <-time.After(time.Second):
+			}
+			continue
 		}
 		if j != nil {
 			a.execute(ctx, *j)
