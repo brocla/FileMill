@@ -72,7 +72,7 @@ func (s *Service) deliverPending(ctx context.Context) error {
 			}
 		}
 
-		if err := s.send(ctx, sub.Sender, sub.Subject, sub.MessageID, strings.Join(lines, "\n"), outputs); err != nil {
+		if err := s.send(ctx, sub.Sender, sub.Subject, threadingID(sub.MessageID), strings.Join(lines, "\n"), outputs); err != nil {
 			return err
 		}
 		if err := s.engine.MarkEmailDelivered(sub.ID); err != nil {
@@ -155,6 +155,18 @@ func attachFile(writer *multipart.Writer, path string) error {
 	}
 	_, err = io.Copy(part, in)
 	return err
+}
+
+// threadingID returns the value for the reply's In-Reply-To/References headers.
+// Intake stores a synthetic "mailgun:<token>" idempotency key when the inbound
+// mail carried no real Message-Id; that is not a valid message id, so threading
+// on it would emit a malformed header. Return "" in that case (send then omits
+// the headers) and the real Message-Id otherwise.
+func threadingID(idempotencyKey string) string {
+	if strings.HasPrefix(idempotencyKey, "mailgun:") {
+		return ""
+	}
+	return idempotencyKey
 }
 
 // replySubject prefixes "Re:" unless the subject already carries it.

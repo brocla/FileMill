@@ -9,6 +9,18 @@ import (
 	"time"
 )
 
+func TestThreadingIDSuppressesSyntheticKey(t *testing.T) {
+	if got := threadingID("mailgun:abc123"); got != "" {
+		t.Fatalf("synthetic key must not thread; got %q", got)
+	}
+	if got := threadingID("<real@example.com>"); got != "<real@example.com>" {
+		t.Fatalf("real Message-Id must thread; got %q", got)
+	}
+	if got := threadingID(""); got != "" {
+		t.Fatalf("empty stays empty; got %q", got)
+	}
+}
+
 func sendTestService(baseURL string, client *http.Client) *Service {
 	return &Service{
 		from:     "filemill@mill.test",
