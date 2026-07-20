@@ -50,7 +50,7 @@ To start it automatically whenever you sign in, run this once from your normal P
 .\scripts\Install-FileMillScheduledTask.ps1 -StartNow
 ```
 
-The task is named `FileMill Worker`, runs only while you are signed in, and starts the same background worker. FileMill logs to `data\logs\filemill.log`. To remove the automatic start later:
+The task is named `FileMill Worker` and runs only while you are signed in. It launches a **supervisor** (`Supervise-FileMill.ps1`) that runs `filemill run` and **restarts it automatically if it crashes** — an immediate first retry, then escalating backoff (5s, 15s, 30s, 60s, 120s) for repeated rapid failures; a persistent crash-loop is logged (alerting is tracked in issue #7). A clean exit (Ctrl+C / shutdown) stops the supervisor. The worker logs to `data\logs\filemill.log`; supervisor events go to `data\logs\supervisor.log`. To remove the automatic start later (this also stops the running supervisor and worker):
 
 ```powershell
 .\scripts\Uninstall-FileMillScheduledTask.ps1
