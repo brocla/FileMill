@@ -6,11 +6,26 @@ by email (Phase 3 of `FileMill Project Definition.md`). It's written for
 whoever picks up implementation next — human or AI — so the infrastructure
 decisions and the reasoning behind them don't have to be re-derived.
 
-**Status as of this writing: all infrastructure below is built and
-confirmed working end-to-end with both a synthetic test and a real email.
-The Go handler itself (`internal/mailgun` + wiring into `cmd/filemill run`)
-has not been written yet.** See "Open decisions" at the bottom before
-starting.
+**Status: COMPLETE. The Go handler (`internal/mailgun`, wired into
+`cmd/filemill run`) is built and the full pipeline was verified with a live
+email on 2026-07-20 — a real PDF to `workerlist@mill.keywind.cc` came back as
+a `schedule.xlsx` reply to the sender.**
+
+> **CORRECTION (2026-07-20), read this first — it overrides several claims
+> below.** The Mailgun route action must be **`forward("<webhook URL>")`**,
+> NOT `store(notify="<webhook URL>")`. `store(notify=)` POSTs only ~7 KB of
+> form-urlencoded *metadata* with attachments referenced by a storage URL —
+> the file bytes are NOT inline, so the handler (which reads inline multipart
+> `attachment-N` parts) sees no attachment and silently returns 200 with no
+> job. `forward(<url>)` POSTs the full message as `multipart/form-data` with
+> attachments inline, which is what the handler expects. The multipart payload
+> documented in section 5 is the **forward-to-URL** shape, not store-notify.
+> Working route: expression `catch_all()` (safe — `mill.keywind.cc` is
+> dedicated to this pipeline), action `forward("https://notify.keywind.cc/mailgun-webhook")`.
+> Also observed: Mailgun route processing lagged up to ~10 minutes during
+> testing, so a delayed result is not a failure. A more robust alternative for
+> large attachments is to keep `store()` and have FileMill fetch the file from
+> the storage URL with the API key — noted as future work, not built.
 
 ---
 
@@ -32,10 +47,11 @@ Three inbound patterns were evaluated:
    Go IMAP client would have to poll every 15–30s continuously to hit the
    latency target — fragile and heavier than the alternative.
 3. **Store-and-pull hybrid** (e.g. Mailgun's `store()` + a separate pull
-   API call) — considered, but turned out to be unnecessary: Mailgun's
-   `notify()` action, as configured here, already delivers the fully
-   parsed message inline in the notify POST. No second API round-trip is
-   needed for the common case.
+   API call) — considered and initially assumed unnecessary, but see the
+   CORRECTION above: `store(notify=)` does **not** deliver attachments
+   inline (only metadata + a storage URL). The chosen `forward(<url>)`
+   action posts the full message inline, so no second API round-trip is
+   needed — but that is a property of `forward`, not `store(notify=)`.
 
 Provider choice landed on **Mailgun** over iCloud/Gmail/Outlook because it
 requires no OAuth app registration (API key only), and over a raw
@@ -60,8 +76,9 @@ Mailgun MX (mxa.mailgun.org / mxb.mailgun.org)
   |  receives via SMTP
   |  evaluates Routes
   v
-Mailgun Route match: match_recipient(".*@mill.keywind.cc")
-  action: store(notify="https://notify.keywind.cc/mailgun-webhook")
+Mailgun Route match: catch_all()   [or match_recipient(".*@mill.keywind.cc")]
+  action: forward("https://notify.keywind.cc/mailgun-webhook")
+  (NOT store(notify=...) — see CORRECTION at top; forward posts attachments inline)
   |
   |  stores the message (~3 day retention, backup only — not the primary path)
   |  AND immediately POSTs the fully parsed message as multipart/form-data
@@ -118,11 +135,11 @@ FileMill Go process, HTTP server on :8080, handler at /mailgun-webhook
     whatever you type in the Name field. A record must be entered as
     `_dmarc.mill` (not `_dmarc`, and not the full `_dmarc.mill.keywind.cc`)
     to resolve to the correct host.
-- **Mailgun**: domain `mill.keywind.cc` added and fully verified. Route
-  created: `match_recipient(".*@mill.keywind.cc")` ->
-  `store(notify="https://notify.keywind.cc/mailgun-webhook")`. Confirmed
-  working via both Mailgun's "Send a sample POST" test and a real inbound
-  email.
+- **Mailgun**: domain `mill.keywind.cc` added and fully verified. Working
+  route: expression `catch_all()`, action
+  `forward("https://notify.keywind.cc/mailgun-webhook")` (see CORRECTION at
+  top — `forward` delivers attachments inline; `store(notify=)` does not).
+  Confirmed working with a real inbound email producing a reply on 2026-07-20.
 - **Cloudflare Tunnel**: `cloudflared` installed via winget, running as a
   Windows service (`cloudflared.exe service install <token>`; if it shows
   installed-but-stopped, `Start-Service Cloudflared` from an elevated

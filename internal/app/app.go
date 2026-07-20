@@ -53,6 +53,10 @@ func Open(root string) (*App, error) {
 	return &App{root: root, data: data, cfg: cfg, store: s, log: log.New(lf, "", log.LstdFlags|log.LUTC), logFile: lf}, nil
 }
 func (a *App) Close() error { a.logFile.Close(); return a.store.Close() }
+
+// LogWriter exposes the application log sink so adapters (e.g. the Mailgun
+// webhook) can write to the same filemill.log the worker uses.
+func (a *App) LogWriter() io.Writer { return a.logFile }
 func (a *App) Submit(operation, source string) (string, error) {
 	t, ok := a.cfg.Find(operation)
 	if !ok {

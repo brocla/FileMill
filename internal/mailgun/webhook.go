@@ -16,6 +16,9 @@ const requestOverhead = 1 << 20 // 1 MiB
 // are logged (useful for a public endpoint), and 4xx/5xx additionally send an
 // error body so Mailgun can distinguish "don't retry" (4xx) from "retry" (5xx).
 func (s *Service) handle(w http.ResponseWriter, r *http.Request) {
+	// Unconditional arrival log: any request that reaches this handler is
+	// recorded before any check, so "did the POST arrive?" is never ambiguous.
+	s.log.Printf("webhook received: method=%s content-type=%q length=%d", r.Method, r.Header.Get("Content-Type"), r.ContentLength)
 	r.Body = http.MaxBytesReader(w, r.Body, s.maxBytes+requestOverhead)
 	status, reason := s.receive(r)
 	if reason != "" {
