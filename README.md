@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="logo2.png" alt="FileMill" width="420">
+</p>
+
 # FileMill
 
 Local-first file transformation harness. Transformers are independent programs registered in `config/transformers.yaml`.
