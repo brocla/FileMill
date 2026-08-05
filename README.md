@@ -56,6 +56,26 @@ The task is named `FileMill Worker` and runs only while you are signed in. It la
 .\scripts\Uninstall-FileMillScheduledTask.ps1
 ```
 
+### Restart the worker (to pick up config changes)
+
+`config\email.yaml` and `config\transformers.yaml` are read once at startup, so restart the worker after editing them.
+
+**Under the supervisor** (started via the scheduled task above), just stop the worker — the supervisor relaunches it immediately with the new config:
+
+```powershell
+Get-Process filemill | Stop-Process -Force
+```
+
+Then check the logs: `data\logs\supervisor.log` should show `restarting immediately`, and `data\logs\filemill.log` should show the `FileMill … — webhook listening on :8080` startup line. Do **not** stop the scheduled task or the supervisor to reload config — a clean stop tells the supervisor you're done; killing just the `filemill` process is what triggers a reload-and-restart.
+
+**Running by hand** (a foreground `.\bin\filemill.exe run` window): press `Ctrl+C`, then run `.\bin\filemill.exe run` again.
+
+To restart the whole chain (supervisor + worker) cleanly instead:
+
+```powershell
+Stop-ScheduledTask -TaskName 'FileMill Worker'; Start-ScheduledTask -TaskName 'FileMill Worker'
+```
+
 ## Transformer contract
 
 FileMill runs the configured `command` in a job workspace and appends `job.json`. A transformer reads `job.json`, treats `input/` as read-only, writes artifacts only in `output/`, then writes `result.json` in the workspace. Both files carry `contract_version: "1"`.
