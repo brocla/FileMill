@@ -116,6 +116,26 @@ func TestWebhookRetriesGenuineIntakeFailure(t *testing.T) {
 	}
 }
 
+// TestWebhookLogsSenderOnAccept covers the happy path: a successfully accepted
+// submission logs an "accepted" line naming the verified sender, so successful
+// mail is attributable in the log and not only in the database.
+func TestWebhookLogsSenderOnAccept(t *testing.T) {
+	engine := newFakeEngine()
+	logger, buf := captureLogger()
+	s := &Service{engine: engine, signKey: "key", maxBytes: 1024, routes: map[string]string{"workerlist@mill.keywind.cc": "workerlist"}, allowed: map[string]bool{}, log: logger}
+	r := signedMultipart(t, s.signKey,
+		map[string]string{"recipient": "workerlist@mill.keywind.cc", "sender": "sender@example.com"},
+		map[string][]byte{"attachment-1": []byte("pdf")})
+	w := httptest.NewRecorder()
+	s.handle(w, r)
+	if w.Code != http.StatusOK {
+		t.Fatalf("got %d, want 200", w.Code)
+	}
+	if !strings.Contains(buf.String(), "accepted:") || !strings.Contains(buf.String(), "sender@example.com") {
+		t.Errorf("accept line must name the sender; got %q", buf.String())
+	}
+}
+
 // signedMultipart builds a signed multipart webhook request with the given form
 // fields and attachments (field name -> content).
 func signedMultipart(t *testing.T, signKey string, fields map[string]string, files map[string][]byte) *http.Request {
