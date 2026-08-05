@@ -87,7 +87,7 @@ func (s *Service) receive(r *http.Request) (status int, reason string) {
 		}
 		return http.StatusInternalServerError, fmt.Sprintf("intake failed from %s: %v", sender, err)
 	}
-	return http.StatusOK, ""
+	return http.StatusOK, fmt.Sprintf("accepted: sender=%q recipient=%q operation=%s", sender, r.FormValue("recipient"), operation)
 }
 
 // parseForm decodes the request body. Mailgun sends no-attachment notifications
