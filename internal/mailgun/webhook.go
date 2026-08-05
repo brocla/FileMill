@@ -1,10 +1,14 @@
 package mailgun
 
 import (
+	"errors"
+	"fmt"
 	"mime/multipart"
 	"net/http"
 	"sort"
 	"strings"
+
+	"filemill/internal/app"
 )
 
 // requestOverhead is the slack, on top of the per-attachment limit, allowed for
@@ -40,6 +44,11 @@ func (s *Service) handle(w http.ResponseWriter, r *http.Request) {
 //	401 - bad, missing, or stale signature
 //	405 - not a POST
 //	500 - our fault; please retry (storage, filesystem, submit failures)
+//
+// A rejected attachment (wrong file type) is the sender's fault and can never
+// succeed on retry, so it maps to 200, not 500 — returning 500 made Mailgun
+// retry an unprocessable message for hours. Every outcome past the signature
+// check names the (now verified) sender, so failures are attributable.
 func (s *Service) receive(r *http.Request) (status int, reason string) {
 	if r.Method != http.MethodPost {
 		return http.StatusMethodNotAllowed, "method not allowed"
@@ -51,25 +60,32 @@ func (s *Service) receive(r *http.Request) (status int, reason string) {
 		return http.StatusUnauthorized, "invalid signature"
 	}
 
-	// The request is now trusted. The remaining "nothing to do" outcomes return
+	// The request is now trusted, so the sender field is verified and named in
+	// every subsequent outcome. The remaining "nothing to do" outcomes return
 	// 200 so Mailgun does not retry a request there is no point reprocessing.
+	sender := r.FormValue("sender")
 	files := attachments(r)
 	if len(files) == 0 {
 		return http.StatusOK, "" // e.g. a no-attachment notification
 	}
 	operation, ok := s.operationFor(r.FormValue("recipient"))
 	if !ok {
-		return http.StatusOK, "unrouted recipient " + r.FormValue("recipient")
+		return http.StatusOK, fmt.Sprintf("unrouted recipient %s (from %s)", r.FormValue("recipient"), sender)
 	}
-	if !s.senderAllowed(r.FormValue("sender")) {
-		return http.StatusOK, "sender not allowed " + r.FormValue("sender")
+	if !s.senderAllowed(sender) {
+		return http.StatusOK, "sender not allowed " + sender
 	}
 	if !s.withinSizeLimit(files) {
-		return http.StatusBadRequest, "attachment exceeds size limit"
+		return http.StatusBadRequest, "attachment exceeds size limit (from " + sender + ")"
 	}
 
 	if err := s.intake(r, operation, files); err != nil {
-		return http.StatusInternalServerError, "intake failed: " + err.Error()
+		if errors.Is(err, app.ErrRejected) {
+			// Permanent: the sender's input is unprocessable. Drop it (200) so
+			// Mailgun stops retrying, and record who sent it and why.
+			return http.StatusOK, fmt.Sprintf("attachment rejected from %s: %v", sender, err)
+		}
+		return http.StatusInternalServerError, fmt.Sprintf("intake failed from %s: %v", sender, err)
 	}
 	return http.StatusOK, ""
 }

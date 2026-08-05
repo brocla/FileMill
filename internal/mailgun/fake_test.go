@@ -1,6 +1,7 @@
 package mailgun
 
 import (
+	"bytes"
 	"fmt"
 	"io"
 	"log"
@@ -11,6 +12,13 @@ import (
 
 // discardLogger is a no-op logger for tests that don't assert on log output.
 func discardLogger() *log.Logger { return log.New(io.Discard, "", 0) }
+
+// captureLogger returns a logger and the buffer it writes to, so a test can
+// assert on what the webhook recorded (e.g. that a reason names the sender).
+func captureLogger() (*log.Logger, *bytes.Buffer) {
+	buf := &bytes.Buffer{}
+	return log.New(buf, "", 0), buf
+}
 
 // fakeEngine is an in-memory Engine for isolation tests: no filesystem, no
 // SQLite, no transformer subprocess. It records the order of mutating calls so
@@ -23,7 +31,8 @@ type fakeEngine struct {
 	delivered map[int64]bool
 
 	submitCount     int
-	failSubmitAfter int // fail Submit once this many have succeeded; -1 = never
+	failSubmitAfter int   // fail Submit once this many have succeeded; -1 = never
+	submitErr       error // when set, Submit fails immediately with this error
 
 	calls []string // ordered log of mutating calls
 
@@ -44,6 +53,9 @@ func newFakeEngine() *fakeEngine {
 
 func (f *fakeEngine) Submit(operation, source string) (string, error) {
 	f.calls = append(f.calls, "Submit")
+	if f.submitErr != nil {
+		return "", f.submitErr
+	}
 	if f.failSubmitAfter >= 0 && f.submitCount >= f.failSubmitAfter {
 		return "", fmt.Errorf("submit failed")
 	}

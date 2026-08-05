@@ -5,12 +5,16 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
+
+	"filemill/internal/app"
 )
 
 // signedFields returns a fresh timestamp, token, and matching HMAC signature for
@@ -66,6 +70,49 @@ func TestWebhookRejectsOversizeAttachment(t *testing.T) {
 	s.handle(w, r)
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("got %d, want 400", w.Code)
+	}
+}
+
+// TestWebhookAcceptsAndDropsRejectedAttachment covers a permanent input
+// rejection (e.g. a .html attachment the transformer does not accept). Retrying
+// can never succeed, so the handler must return 200 to stop Mailgun retrying —
+// not 500, which triggered a multi-hour retry storm.
+func TestWebhookAcceptsAndDropsRejectedAttachment(t *testing.T) {
+	engine := newFakeEngine()
+	engine.submitErr = fmt.Errorf(`workerlist does not accept ".html": %w`, app.ErrRejected)
+	logger, buf := captureLogger()
+	s := &Service{engine: engine, signKey: "key", maxBytes: 1024, routes: map[string]string{"workerlist@mill.keywind.cc": "workerlist"}, allowed: map[string]bool{}, log: logger}
+	r := signedMultipart(t, s.signKey,
+		map[string]string{"recipient": "workerlist@mill.keywind.cc", "sender": "sender@example.com"},
+		map[string][]byte{"attachment-1": []byte("<html>")})
+	w := httptest.NewRecorder()
+	s.handle(w, r)
+	if w.Code != http.StatusOK {
+		t.Fatalf("got %d, want 200 (permanent rejection must not be retried)", w.Code)
+	}
+	if !strings.Contains(buf.String(), "sender@example.com") {
+		t.Errorf("rejection reason must name the sender; got %q", buf.String())
+	}
+}
+
+// TestWebhookRetriesGenuineIntakeFailure guards the other side: a real,
+// transient failure (storage, filesystem) must still return 500 so Mailgun
+// retries. The sender is recorded either way.
+func TestWebhookRetriesGenuineIntakeFailure(t *testing.T) {
+	engine := newFakeEngine()
+	engine.submitErr = fmt.Errorf("disk full")
+	logger, buf := captureLogger()
+	s := &Service{engine: engine, signKey: "key", maxBytes: 1024, routes: map[string]string{"workerlist@mill.keywind.cc": "workerlist"}, allowed: map[string]bool{}, log: logger}
+	r := signedMultipart(t, s.signKey,
+		map[string]string{"recipient": "workerlist@mill.keywind.cc", "sender": "sender@example.com"},
+		map[string][]byte{"attachment-1": []byte("pdf")})
+	w := httptest.NewRecorder()
+	s.handle(w, r)
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("got %d, want 500 (transient failure must be retryable)", w.Code)
+	}
+	if !strings.Contains(buf.String(), "sender@example.com") {
+		t.Errorf("failure reason must name the sender; got %q", buf.String())
 	}
 }
 

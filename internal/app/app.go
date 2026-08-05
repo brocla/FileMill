@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -19,6 +20,13 @@ import (
 )
 
 const timeout = 10 * time.Minute
+
+// ErrRejected marks a Submit failure caused by unacceptable input — a wrong
+// file type, a directory, or an unknown operation. The input itself is the
+// problem, so retrying with the same input can never succeed. Callers that
+// front a retrying transport (the Mailgun webhook) test for this with
+// errors.Is to distinguish a permanent rejection from a transient failure.
+var ErrRejected = errors.New("input rejected")
 
 type App struct {
 	root, data string
@@ -60,17 +68,17 @@ func (a *App) LogWriter() io.Writer { return a.logFile }
 func (a *App) Submit(operation, source string) (string, error) {
 	t, ok := a.cfg.Find(operation)
 	if !ok {
-		return "", fmt.Errorf("unknown operation %q", operation)
+		return "", fmt.Errorf("%w: unknown operation %q", ErrRejected, operation)
 	}
 	info, err := os.Stat(source)
 	if err != nil {
 		return "", err
 	}
 	if info.IsDir() {
-		return "", fmt.Errorf("input must be a file")
+		return "", fmt.Errorf("%w: input must be a file", ErrRejected)
 	}
 	if !t.Accepts(info.Name()) {
-		return "", fmt.Errorf("%s does not accept %q", operation, filepath.Ext(info.Name()))
+		return "", fmt.Errorf("%w: %s does not accept %q", ErrRejected, operation, filepath.Ext(info.Name()))
 	}
 	id := uuid.NewString()
 	workspace := filepath.Join(a.data, "jobs", id)
