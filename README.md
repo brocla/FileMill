@@ -133,17 +133,14 @@ Editing the YAML above only needs a config reload because the *same* binary re-r
 
 ```powershell
 Stop-ScheduledTask -TaskName 'FileMill Worker'
+Get-Process filemill -ErrorAction SilentlyContinue | Stop-Process -Force
 go build -o bin\filemill.exe ./cmd/filemill
 Start-ScheduledTask -TaskName 'FileMill Worker'
 ```
 
-`Stop-ScheduledTask` ends the supervisor and worker cleanly and releases the exe lock; the build overwrites the binary; `Start-ScheduledTask` launches a fresh supervised chain on the new code. Confirm it came up by checking `data\logs\filemill.log` for a new `FileMill … — webhook listening on :8080` line. Because a fresh start also re-reads the YAML, this one sequence covers any change that touches code, with or without config.
+The second line is **not** optional, despite what it looks like. `Stop-ScheduledTask` reliably ends the *supervisor*, but observed behavior is that it leaves the `filemill` child running and orphaned — the task reports `Ready` while the worker is still up and still holding `bin\filemill.exe`, so the build fails with a file-lock error. Killing the orphan is safe here precisely because the supervisor is already gone: there is nothing left to relaunch the old binary. (Doing it in the other order would just trigger a reload-and-restart, which is the config-reload recipe above, not this one.)
 
-If `go build` fails with a file-lock or permission error, the worker didn't actually stop and is still holding `bin\filemill.exe`. Force it down, then rebuild and start:
-
-```powershell
-Get-Process filemill | Stop-Process -Force
-```
+Then `go build` overwrites the binary and `Start-ScheduledTask` launches a fresh supervised chain on the new code. Confirm it came up by checking `data\logs\filemill.log` for a new `FileMill … — webhook listening on :8080` line, and that `data\logs\supervisor.log` shows a matching `supervisor starting`. Because a fresh start also re-reads the YAML, this one sequence covers any change that touches code, with or without config.
 
 ## Transformer contract
 

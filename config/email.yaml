@@ -16,7 +16,8 @@ routes:
 # sheets-link requires GOOGLE_OAUTH_CLIENT_ID, GOOGLE_OAUTH_CLIENT_SECRET, and
 # GOOGLE_OAUTH_REFRESH_TOKEN in the environment; the worker refuses to start
 # without them rather than quietly falling back to attaching the file.
-delivery: {}
+delivery:
+  iwk@mill.keywind.cc: sheets-link
 
 allowed_senders: []
 max_attachment_bytes: 20971520
