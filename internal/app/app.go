@@ -120,6 +120,16 @@ func (a *App) Accepts(operation, filename string) bool {
 	t, ok := a.cfg.Find(operation)
 	return ok && t.Accepts(filename)
 }
+// OperationOptions returns the options configured for an operation, or nil if
+// there is no such operation. The email adapter cross-checks a route's delivery
+// mode against them at startup.
+func (a *App) OperationOptions(operation string) map[string]any {
+	t, ok := a.cfg.Find(operation)
+	if !ok {
+		return nil
+	}
+	return t.Options
+}
 func (a *App) Job(id string) (store.Job, error) { return a.store.Get(id) }
 func (a *App) Outputs(id string) ([]OutputFile, error) {
 	r, err := readResult(filepath.Join(a.data, "jobs", id, "result.json"), filepath.Join(a.data, "jobs", id))

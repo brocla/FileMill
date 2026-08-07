@@ -2,6 +2,22 @@ routes:
   workerlist@mill.keywind.cc: workerlist_sheets
   iwk@mill.keywind.cc: workerlist_sheets
   excel@mill.keywind.cc: workerlist_excel
+# How the reply for each address is delivered. Absent means "email": the output
+# file is attached, which is what every route does today.
+#
+#   sheets-link  upload the output to Google Drive, convert it to a Google
+#                Sheet shared with anyone who has the link, and reply with the
+#                link instead of a file.
+#
+# A sheets-link address should be routed to an operation whose layout is
+# "sheets" (see config/transformers.yaml) — Drive will convert an excel-layout
+# workbook too, it just looks worse. A mismatch logs one warning at startup.
+#
+# sheets-link requires GOOGLE_OAUTH_CLIENT_ID, GOOGLE_OAUTH_CLIENT_SECRET, and
+# GOOGLE_OAUTH_REFRESH_TOKEN in the environment; the worker refuses to start
+# without them rather than quietly falling back to attaching the file.
+delivery: {}
+
 allowed_senders: []
 max_attachment_bytes: 20971520
 # Timeout for an outbound Mailgun send (reply). Bounds a hung connection so it
