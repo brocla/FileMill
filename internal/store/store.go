@@ -25,6 +25,21 @@ type EmailJob struct {
 	Job   Job
 }
 
+// Delivery records one output file published to Google Drive. It is written
+// before the reply that carries the link, so it serves three purposes at once:
+// a retry finds it and skips re-uploading, the delivery loop reads the link out
+// of it, and the retention sweep gets the file id and age it needs to delete
+// the file later.
+//
+// It is keyed per output file, not per submission: one job may declare several
+// output files, and each becomes its own Drive file.
+type Delivery struct {
+	SubmissionID int64
+	OutputIndex  int
+	FileID, Link string
+	CreatedAt    time.Time
+}
+
 // Job status values. Lifecycle: queued -> running -> succeeded|failed.
 // interrupted marks a job that was still running when the process stopped.
 const (
@@ -69,6 +84,18 @@ func Open(path string) (*Store, error) {
  submission_id INTEGER NOT NULL, attachment_index INTEGER NOT NULL, job_id TEXT NOT NULL UNIQUE,
  PRIMARY KEY(submission_id, attachment_index), FOREIGN KEY(submission_id) REFERENCES email_submissions(id)
 );`)
+	if err != nil {
+		db.Close()
+		return nil, err
+	}
+	// Published Drive files, one row per output file. The sweep sets deleted_at
+	// rather than removing the row, so a swept record is never offered twice and
+	// what was published stays inspectable.
+	_, err = db.Exec(`CREATE TABLE IF NOT EXISTS email_deliveries (
+ submission_id INTEGER NOT NULL, output_index INTEGER NOT NULL,
+ file_id TEXT NOT NULL, link TEXT NOT NULL, created_at TEXT NOT NULL, deleted_at TEXT,
+ PRIMARY KEY(submission_id, output_index), FOREIGN KEY(submission_id) REFERENCES email_submissions(id)
+); CREATE INDEX IF NOT EXISTS email_deliveries_sweep ON email_deliveries(deleted_at, created_at);`)
 	if err != nil {
 		db.Close()
 		return nil, err
@@ -152,6 +179,63 @@ func (s *Store) PendingEmails() ([]EmailSubmission, error) {
 	}
 	return out, nil
 }
+// PutDelivery records a published Drive file. It is the commit point for an
+// upload: once this returns, no retry will upload that output again. INSERT OR
+// IGNORE makes a repeated write harmless rather than overwriting a link that
+// has already been mailed out.
+func (s *Store) PutDelivery(submissionID int64, outputIndex int, fileID, link string) error {
+	_, err := s.db.Exec("INSERT OR IGNORE INTO email_deliveries(submission_id,output_index,file_id,link,created_at) VALUES(?,?,?,?,?)",
+		submissionID, outputIndex, fileID, link, time.Now().UTC().Format(time.RFC3339Nano))
+	return err
+}
+
+// Delivery returns the record for one output, if it has been published. A
+// swept (deleted) record still counts: the file is gone from Drive, but the
+// submission was delivered and must never be re-uploaded.
+func (s *Store) Delivery(submissionID int64, outputIndex int) (Delivery, bool, error) {
+	d := Delivery{SubmissionID: submissionID, OutputIndex: outputIndex}
+	var created string
+	err := s.db.QueryRow("SELECT file_id,link,created_at FROM email_deliveries WHERE submission_id=? AND output_index=?", submissionID, outputIndex).
+		Scan(&d.FileID, &d.Link, &created)
+	if err == sql.ErrNoRows {
+		return Delivery{}, false, nil
+	}
+	if err != nil {
+		return Delivery{}, false, err
+	}
+	d.CreatedAt, _ = time.Parse(time.RFC3339Nano, created)
+	return d, true, nil
+}
+
+// ExpiredDeliveries returns published files created before cutoff that the
+// retention sweep has not yet deleted.
+func (s *Store) ExpiredDeliveries(cutoff time.Time) ([]Delivery, error) {
+	rows, err := s.db.Query("SELECT submission_id,output_index,file_id,link,created_at FROM email_deliveries WHERE deleted_at IS NULL AND created_at<? ORDER BY created_at",
+		cutoff.UTC().Format(time.RFC3339Nano))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Delivery
+	for rows.Next() {
+		var d Delivery
+		var created string
+		if err := rows.Scan(&d.SubmissionID, &d.OutputIndex, &d.FileID, &d.Link, &created); err != nil {
+			return nil, err
+		}
+		d.CreatedAt, _ = time.Parse(time.RFC3339Nano, created)
+		out = append(out, d)
+	}
+	return out, rows.Err()
+}
+
+// MarkDeliveryDeleted records that the sweep removed the Drive file.
+func (s *Store) MarkDeliveryDeleted(submissionID int64, outputIndex int) error {
+	_, err := s.db.Exec("UPDATE email_deliveries SET deleted_at=? WHERE submission_id=? AND output_index=?",
+		time.Now().UTC().Format(time.RFC3339Nano), submissionID, outputIndex)
+	return err
+}
+
 func (s *Store) MarkEmailDelivered(id int64) error {
 	_, err := s.db.Exec("UPDATE email_submissions SET delivered_at=? WHERE id=?", time.Now().UTC().Format(time.RFC3339Nano), id)
 	return err

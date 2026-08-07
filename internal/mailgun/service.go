@@ -17,6 +17,7 @@ package mailgun
 import (
 	"log"
 	"net/http"
+	"time"
 
 	"filemill/internal/app"
 	"filemill/internal/store"
@@ -36,6 +37,14 @@ type Engine interface {
 	PendingEmails() ([]store.EmailSubmission, error)
 	MarkEmailDelivered(id int64) error
 	Outputs(id string) ([]app.OutputFile, error)
+
+	// Published Drive files, for the sheets-link delivery mode: recorded before
+	// the reply is sent so a retry reuses the link instead of uploading again,
+	// and swept once they pass the retention horizon.
+	PutDelivery(submissionID int64, outputIndex int, fileID, link string) error
+	Delivery(submissionID int64, outputIndex int) (store.Delivery, bool, error)
+	ExpiredDeliveries(cutoff time.Time) ([]store.Delivery, error)
+	MarkDeliveryDeleted(submissionID int64, outputIndex int) error
 }
 
 // Service holds the adapter's configuration and its dependency on the job

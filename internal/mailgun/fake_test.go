@@ -6,7 +6,9 @@ import (
 	"io"
 	"log"
 	"path/filepath"
+	"sort"
 	"strings"
+	"time"
 
 	"filemill/internal/app"
 	"filemill/internal/store"
@@ -43,8 +45,12 @@ type fakeEngine struct {
 
 	calls []string // ordered log of mutating calls
 
-	pending []store.EmailSubmission
-	outputs map[string][]app.OutputFile
+	pending    []store.EmailSubmission
+	outputs    map[string][]app.OutputFile
+	outputsErr map[string]error // job id -> error Outputs should return
+
+	deliveries      map[deliveryKey]store.Delivery
+	sweptDeliveries map[deliveryKey]bool
 }
 
 func newFakeEngine() *fakeEngine {
@@ -55,6 +61,9 @@ func newFakeEngine() *fakeEngine {
 		delivered:       map[int64]bool{},
 		failSubmitAfter: -1,
 		outputs:         map[string][]app.OutputFile{},
+		outputsErr:      map[string]error{},
+		deliveries:      map[deliveryKey]store.Delivery{},
+		sweptDeliveries: map[deliveryKey]bool{},
 	}
 }
 
@@ -119,4 +128,49 @@ func (f *fakeEngine) MarkEmailDelivered(id int64) error {
 	return nil
 }
 
-func (f *fakeEngine) Outputs(id string) ([]app.OutputFile, error) { return f.outputs[id], nil }
+func (f *fakeEngine) Outputs(id string) ([]app.OutputFile, error) {
+	if err := f.outputsErr[id]; err != nil {
+		return nil, err
+	}
+	return f.outputs[id], nil
+}
+
+// deliveryKey identifies one published output in the fake's record table.
+type deliveryKey struct {
+	submissionID int64
+	outputIndex  int
+}
+
+func (f *fakeEngine) PutDelivery(submissionID int64, outputIndex int, fileID, link string) error {
+	f.calls = append(f.calls, fmt.Sprintf("PutDelivery(%d,%d)", submissionID, outputIndex))
+	key := deliveryKey{submissionID, outputIndex}
+	if _, exists := f.deliveries[key]; exists {
+		return nil // INSERT OR IGNORE: never overwrite a link already mailed out
+	}
+	f.deliveries[key] = store.Delivery{
+		SubmissionID: submissionID, OutputIndex: outputIndex,
+		FileID: fileID, Link: link, CreatedAt: time.Now().UTC(),
+	}
+	return nil
+}
+
+func (f *fakeEngine) Delivery(submissionID int64, outputIndex int) (store.Delivery, bool, error) {
+	d, ok := f.deliveries[deliveryKey{submissionID, outputIndex}]
+	return d, ok, nil
+}
+
+func (f *fakeEngine) ExpiredDeliveries(cutoff time.Time) ([]store.Delivery, error) {
+	var out []store.Delivery
+	for key, d := range f.deliveries {
+		if !f.sweptDeliveries[key] && d.CreatedAt.Before(cutoff) {
+			out = append(out, d)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].SubmissionID < out[j].SubmissionID })
+	return out, nil
+}
+
+func (f *fakeEngine) MarkDeliveryDeleted(submissionID int64, outputIndex int) error {
+	f.sweptDeliveries[deliveryKey{submissionID, outputIndex}] = true
+	return nil
+}
