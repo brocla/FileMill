@@ -1,11 +1,33 @@
 # Sheets-Link Delivery — Implementation Plan
 
-**Status:** designed; **code not started.** Google Cloud + OAuth setup is
-**complete and validated** (2026-08-07) — all three `GOOGLE_OAUTH_*` env vars set,
-and the full chain proven end to end: consent → code exchange → refresh token →
-headless access-token refresh (scope `drive.file`). Workerlist's Excel/Sheets
-layout support is now merged to workerlist `main`. Written as a durable handoff
-for a fresh context.
+**Status:** **built** (2026-08-07, branch `sheets-delivery`) — steps 1–3 of the
+sequencing below are implemented and unit-tested; step 4 (flipping `iwk@`) is
+config-only and deliberately not done yet, so `delivery:` ships as `{}` and no
+behavior changes until an address is listed.
+
+**Blocked on one setup step:** the **Google Drive API was never enabled** in the
+Cloud project. OAuth was validated in isolation and does refresh correctly, but
+the first real upload returned `SERVICE_DISABLED` — token refresh and API
+enablement are separate things, and only the latter is missing. Enable Google
+Drive API for the project, then run
+`FILEMILL_GOOGLE_E2E=1 go test ./internal/gsheets -run Live -v`.
+
+Deviations from the design below, all deliberate:
+
+- **The delivery record is keyed `(submission_id, output_index)`**, not per
+  submission. `contract.Result.OutputFiles` is a list, so one job may declare
+  several outputs; per-submission keying would re-upload and orphan the rest.
+- **One processable attachment per email** is now enforced at the webhook
+  (dropped silently to the sender, logged). Attachments the transformer does not
+  accept are filtered out before counting, so an inline signature logo cannot
+  make a one-PDF submission look like two.
+- **Missing Google credentials on a `sheets-link` route is a startup error**, not
+  a fallback to attachment delivery.
+- **An unknown `delivery:` value is a startup error** rather than a silently
+  inert route.
+- **The retention sweep runs a minute after startup**, then daily — a plain
+  24-hour ticker would never fire on a worker that restarts for every config
+  reload.
 
 ## Goal
 

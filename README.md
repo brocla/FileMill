@@ -36,6 +36,57 @@ The `workerlist` transformer is registered through the Windows Python launcher. 
 
 The resulting spreadsheet is retained in `data\jobs\<job-id>\output\schedule.xlsx`.
 
+## Email delivery modes
+
+A reply normally carries the output file as an attachment. An address can
+instead be set to **`sheets-link`**, which uploads the output to Google Drive,
+converts it to a native Google Sheet shared with anyone holding the link, and
+replies with the link. Set it per address in `config\email.yaml`:
+
+```yaml
+delivery:
+  iwk@mill.keywind.cc: sheets-link
+```
+
+Return mode is a property of the *address*, not the transformer — `iwk@` and
+`workerlist@` can share one operation and reply differently. A `sheets-link`
+address should be routed to an operation whose `layout` is `sheets`; a mismatch
+logs one warning at startup rather than failing, since Drive converts either
+layout.
+
+**One email, one attachment.** A message carrying more than one attachment the
+transformer can process is dropped with a log line and no reply — one email
+produces one reply and one upload, so several attachments have no unambiguous
+answer. Attachments the transformer does not accept (an inline signature logo)
+are ignored rather than counted.
+
+### Google setup for `sheets-link`
+
+1. **Enable the Drive API** for the Cloud project that owns the OAuth client
+   (console → APIs & Services → Library → Google Drive API → Enable). OAuth
+   credentials alone are not enough: without this, uploads fail with
+   `SERVICE_DISABLED` even though the token refreshes correctly.
+2. Set these in the environment, alongside the `MAILGUN_*` variables — never in
+   `email.yaml`:
+   - `GOOGLE_OAUTH_CLIENT_ID`
+   - `GOOGLE_OAUTH_CLIENT_SECRET`
+   - `GOOGLE_OAUTH_REFRESH_TOKEN`
+
+The scope is `drive.file`, so FileMill can only see files it created itself.
+The worker **refuses to start** if an address asks for `sheets-link` and any of
+these is missing — it will not quietly fall back to attaching the file. A
+running worker must be restarted to see newly-set variables.
+
+Published files are deleted from Drive after 30 days by a sweep that runs a
+minute after startup and daily thereafter.
+
+To check the Google path end to end against real Drive (creates one file and
+deletes it):
+
+```powershell
+$env:FILEMILL_GOOGLE_E2E = '1'; go test ./internal/gsheets -run Live -v
+```
+
 ## Run the worker in the background
 
 FileMill should run under your Windows account so it can use locally installed transformers and their dependencies. Start it immediately in the background with:
