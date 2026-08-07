@@ -179,6 +179,7 @@ func (s *Store) PendingEmails() ([]EmailSubmission, error) {
 	}
 	return out, nil
 }
+
 // PutDelivery records a published Drive file. It is the commit point for an
 // upload: once this returns, no retry will upload that output again. INSERT OR
 // IGNORE makes a repeated write harmless rather than overwriting a link that

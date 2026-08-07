@@ -113,6 +113,7 @@ func (a *App) Submit(operation, source string) (string, error) {
 	a.log.Printf("job=%s status=queued operation=%s", id, operation)
 	return id, nil
 }
+
 // Accepts reports whether the named operation's transformer handles a file with
 // this name. The email adapter asks before submitting, so it can tell an
 // attachment that is real work from one that is incidental (a signature image).
@@ -120,6 +121,7 @@ func (a *App) Accepts(operation, filename string) bool {
 	t, ok := a.cfg.Find(operation)
 	return ok && t.Accepts(filename)
 }
+
 // OperationOptions returns the options configured for an operation, or nil if
 // there is no such operation. The email adapter cross-checks a route's delivery
 // mode against them at startup.

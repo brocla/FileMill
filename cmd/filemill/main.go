@@ -88,6 +88,9 @@ func main() {
 					}
 				}()
 				go mail.Deliver(ctx)
+				// Retention only matters for published files, and the sweep is
+				// inert when no route publishes any.
+				go mail.SweepExpired(ctx)
 			} else {
 				mailLog.Print("integration disabled: no Mailgun environment variables set")
 			}
