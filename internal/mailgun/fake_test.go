@@ -17,6 +17,10 @@ import (
 // discardLogger is a no-op logger for tests that don't assert on log output.
 func discardLogger() *log.Logger { return log.New(io.Discard, "", 0) }
 
+// newTestLogger writes to the given sink, for tests that assert on log output
+// but keep their own buffer.
+func newTestLogger(w io.Writer) *log.Logger { return log.New(w, "", 0) }
+
 // captureLogger returns a logger and the buffer it writes to, so a test can
 // assert on what the webhook recorded (e.g. that a reason names the sender).
 func captureLogger() (*log.Logger, *bytes.Buffer) {

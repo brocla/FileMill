@@ -15,6 +15,7 @@
 package mailgun
 
 import (
+	"context"
 	"log"
 	"net/http"
 	"time"
@@ -47,10 +48,33 @@ type Engine interface {
 	MarkDeliveryDeleted(submissionID int64, outputIndex int) error
 }
 
+// Publisher publishes an output file somewhere a link can reach it. The
+// sheets-link delivery mode uses it to put a spreadsheet in Google Drive;
+// internal/gsheets is the real implementation and tests supply a fake, so the
+// delivery loop is exercisable without touching the network.
+type Publisher interface {
+	// Publish uploads the file at path under the given name, converts it to a
+	// Google Sheet, shares it with anyone who has the link, and returns the
+	// file's id and its shareable URL.
+	Publish(ctx context.Context, path, name string) (fileID, link string, err error)
+	// Delete removes a previously published file. Deleting one that is already
+	// gone is success, so the retention sweep can safely repeat itself.
+	Delete(ctx context.Context, fileID string) error
+}
+
+// Delivery modes, selected per recipient address in email.yaml.
+const (
+	// modeEmail attaches the output files to the reply. The default.
+	modeEmail = "email"
+	// modeSheetsLink publishes each output and replies with the link instead.
+	modeSheetsLink = "sheets-link"
+)
+
 // Service holds the adapter's configuration and its dependency on the job
 // engine. Construct it with Load.
 type Service struct {
-	engine Engine
+	engine    Engine
+	publisher Publisher // nil unless a sheets-link route is configured
 
 	signKey string // Mailgun HTTP webhook signing key — verifies inbound POSTs
 	apiKey  string // Mailgun private API key — authenticates outbound sends
@@ -58,6 +82,7 @@ type Service struct {
 	from    string // address replies are sent from
 
 	routes   map[string]string // recipient address -> transformer operation
+	delivery map[string]string // recipient address -> delivery mode (absent = modeEmail)
 	allowed  map[string]bool   // envelope senders permitted to submit (empty = all)
 	maxBytes int64             // per-attachment size limit
 
