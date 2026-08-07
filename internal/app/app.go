@@ -113,6 +113,13 @@ func (a *App) Submit(operation, source string) (string, error) {
 	a.log.Printf("job=%s status=queued operation=%s", id, operation)
 	return id, nil
 }
+// Accepts reports whether the named operation's transformer handles a file with
+// this name. The email adapter asks before submitting, so it can tell an
+// attachment that is real work from one that is incidental (a signature image).
+func (a *App) Accepts(operation, filename string) bool {
+	t, ok := a.cfg.Find(operation)
+	return ok && t.Accepts(filename)
+}
 func (a *App) Job(id string) (store.Job, error) { return a.store.Get(id) }
 func (a *App) Outputs(id string) ([]OutputFile, error) {
 	r, err := readResult(filepath.Join(a.data, "jobs", id, "result.json"), filepath.Join(a.data, "jobs", id))

@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"path/filepath"
+	"strings"
 
 	"filemill/internal/app"
 	"filemill/internal/store"
@@ -31,8 +33,13 @@ type fakeEngine struct {
 	delivered map[int64]bool
 
 	submitCount     int
-	failSubmitAfter int   // fail Submit once this many have succeeded; -1 = never
-	submitErr       error // when set, Submit fails immediately with this error
+	sources         []string // source paths passed to Submit, in order
+	failSubmitAfter int      // fail Submit once this many have succeeded; -1 = never
+	submitErr       error    // when set, Submit fails immediately with this error
+
+	// accepted lists the extensions the fake transformer accepts (".pdf").
+	// nil accepts everything, which is what most tests want.
+	accepted []string
 
 	calls []string // ordered log of mutating calls
 
@@ -51,8 +58,22 @@ func newFakeEngine() *fakeEngine {
 	}
 }
 
+func (f *fakeEngine) Accepts(operation, filename string) bool {
+	if f.accepted == nil {
+		return true
+	}
+	ext := strings.ToLower(filepath.Ext(filename))
+	for _, allowed := range f.accepted {
+		if ext == strings.ToLower(allowed) {
+			return true
+		}
+	}
+	return false
+}
+
 func (f *fakeEngine) Submit(operation, source string) (string, error) {
 	f.calls = append(f.calls, "Submit")
+	f.sources = append(f.sources, source)
 	if f.submitErr != nil {
 		return "", f.submitErr
 	}

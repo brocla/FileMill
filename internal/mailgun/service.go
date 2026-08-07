@@ -28,6 +28,7 @@ import (
 // exercisable in isolation.
 type Engine interface {
 	Submit(operation, source string) (jobID string, err error)
+	Accepts(operation, filename string) bool
 	BeginEmail(messageID, sender, recipient, subject string) (id int64, created bool, err error)
 	SetEmailExpected(id int64, count int) error
 	EmailHasJob(id int64, index int) (bool, error)

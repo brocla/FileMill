@@ -17,8 +17,16 @@ func routedService(engine Engine) *Service {
 	}
 }
 
-func twoAttachmentRequest(t *testing.T) *http.Request {
-	return signedMultipart(t, "k",
+// twoAttachmentIntake drives intake directly with a two-attachment message.
+//
+// The webhook layer now refuses a message carrying more than one processable
+// attachment, so this can no longer arrive through receive. intake itself stays
+// group-shaped — its job is to build an N-job submission atomically — and that
+// atomicity is exactly what these tests pin down, so they exercise it at its own
+// boundary rather than through the routing policy above it.
+func twoAttachmentIntake(t *testing.T, s *Service) error {
+	t.Helper()
+	r := signedMultipart(t, "k",
 		map[string]string{
 			"recipient":  "workerlist@mill.keywind.cc",
 			"sender":     "kevin@example.com",
@@ -29,6 +37,10 @@ func twoAttachmentRequest(t *testing.T) *http.Request {
 			"attachment-1": []byte("one"),
 			"attachment-2": []byte("two"),
 		})
+	if err := parseForm(r); err != nil {
+		t.Fatalf("parse form: %v", err)
+	}
+	return s.intake(r, "workerlist", attachments(r))
 }
 
 // The submission must only be finalized (expected_jobs set) after every job
@@ -37,9 +49,8 @@ func TestIntakeSetsExpectedAsFinalCommit(t *testing.T) {
 	fake := newFakeEngine()
 	s := routedService(fake)
 
-	status, reason := s.receive(twoAttachmentRequest(t))
-	if status != http.StatusOK {
-		t.Fatalf("status = %d (%s), want 200", status, reason)
+	if err := twoAttachmentIntake(t, s); err != nil {
+		t.Fatalf("intake: %v", err)
 	}
 
 	if len(fake.calls) == 0 || fake.calls[len(fake.calls)-1] != "SetEmailExpected" {
@@ -71,15 +82,15 @@ func TestIntakeResumeIsIdempotent(t *testing.T) {
 	fake := newFakeEngine()
 	s := routedService(fake)
 
-	if status, reason := s.receive(twoAttachmentRequest(t)); status != http.StatusOK {
-		t.Fatalf("first delivery status = %d (%s), want 200", status, reason)
+	if err := twoAttachmentIntake(t, s); err != nil {
+		t.Fatalf("first delivery: %v", err)
 	}
 	if fake.submitCount != 2 {
 		t.Fatalf("first delivery submitted %d jobs, want 2", fake.submitCount)
 	}
 
-	if status, reason := s.receive(twoAttachmentRequest(t)); status != http.StatusOK {
-		t.Fatalf("retry status = %d (%s), want 200", status, reason)
+	if err := twoAttachmentIntake(t, s); err != nil {
+		t.Fatalf("retry: %v", err)
 	}
 	if fake.submitCount != 2 {
 		t.Fatalf("retry submitted extra jobs: total %d, want 2", fake.submitCount)

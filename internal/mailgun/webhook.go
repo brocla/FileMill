@@ -75,6 +75,20 @@ func (s *Service) receive(r *http.Request) (status int, reason string) {
 	if !s.senderAllowed(sender) {
 		return http.StatusOK, "sender not allowed " + sender
 	}
+
+	// One email is one unit of work. Two processable attachments are ambiguous —
+	// there is one reply, and with link delivery one Drive upload, so a message
+	// carrying several is dropped rather than guessed at. The sender is told
+	// nothing; the log is the record.
+	files = s.processable(operation, files)
+	switch len(files) {
+	case 0:
+		return http.StatusOK, fmt.Sprintf("no attachment %s can process (from %s)", operation, sender)
+	case 1:
+	default:
+		return http.StatusOK, fmt.Sprintf("ignoring message with %d processable attachments; one per email (from %s)", len(files), sender)
+	}
+
 	if !s.withinSizeLimit(files) {
 		return http.StatusBadRequest, "attachment exceeds size limit (from " + sender + ")"
 	}
