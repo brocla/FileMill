@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"filemill/internal/app"
+	"filemill/internal/gsheets"
 	"gopkg.in/yaml.v3"
 )
 
@@ -105,8 +106,12 @@ func Load(root string, engine *app.App, logger *log.Logger) (*Service, error) {
 	// later. There is deliberately no fallback to attachment delivery: sending
 	// the data by a channel the operator did not configure is worse than not
 	// sending it.
-	if err := requireGoogleCredentials(s.delivery, googleCredentials()); err != nil {
+	creds := googleCredentials()
+	if err := requireGoogleCredentials(s.delivery, creds); err != nil {
 		return nil, err
+	}
+	if usesSheetsLink(s.delivery) {
+		s.publisher = gsheets.New(creds.clientID, creds.clientSecret, creds.refreshToken)
 	}
 	warnDeliveryPairing(s.log, s.routes, s.delivery, func(operation string) string {
 		layout, _ := engine.OperationOptions(operation)["layout"].(string)
@@ -131,16 +136,23 @@ func parseDelivery(raw map[string]string) (map[string]string, error) {
 	return delivery, nil
 }
 
+// usesSheetsLink reports whether any route asks for link delivery. Nothing
+// Google-related is required, constructed, or contacted when none does.
+func usesSheetsLink(delivery map[string]string) bool {
+	for _, mode := range delivery {
+		if mode == modeSheetsLink {
+			return true
+		}
+	}
+	return false
+}
+
 // requireGoogleCredentials fails when a route asks for link delivery but the
 // OAuth secrets it needs are not in the environment. With no sheets-link route
 // the credentials are not needed at all, which is what keeps the feature off
 // until it is deliberately configured.
 func requireGoogleCredentials(delivery map[string]string, creds credentials) error {
-	needed := false
-	for _, mode := range delivery {
-		needed = needed || mode == modeSheetsLink
-	}
-	if !needed {
+	if !usesSheetsLink(delivery) {
 		return nil
 	}
 	var missing []string
