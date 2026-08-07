@@ -1,11 +1,13 @@
 package mailgun
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"mime/multipart"
 	"net/http"
 	"sort"
+	"strconv"
 	"strings"
 
 	"filemill/internal/app"
@@ -64,13 +66,24 @@ func (s *Service) receive(r *http.Request) (status int, reason string) {
 	// every subsequent outcome. The remaining "nothing to do" outcomes return
 	// 200 so Mailgun does not retry a request there is no point reprocessing.
 	sender := r.FormValue("sender")
+	recipient := r.FormValue("recipient")
 	files := attachments(r)
 	if len(files) == 0 {
-		return http.StatusOK, "" // e.g. a no-attachment notification
+		// A message that says it carried attachments but posted none inline is
+		// not an empty email — it is the signature of a Mailgun route using
+		// store(notify=) rather than forward(url), which posts metadata and
+		// leaves the bytes behind a storage URL. Every real submission would
+		// vanish here, looking exactly like ordinary empty mail, so name it.
+		if declared := declaredAttachments(r); declared > 0 {
+			return http.StatusOK, fmt.Sprintf("WARNING: message declares %d attachment(s) but none arrived inline — is the Mailgun route using store(notify=) instead of forward(url)? (to %s from %s)", declared, recipient, sender)
+		}
+		// Routine, but still recorded: with nothing logged at all, a message
+		// that arrived and one that never did looked identical.
+		return http.StatusOK, fmt.Sprintf("no attachments (to %s from %s)", recipient, sender)
 	}
-	operation, ok := s.operationFor(r.FormValue("recipient"))
+	operation, ok := s.operationFor(recipient)
 	if !ok {
-		return http.StatusOK, fmt.Sprintf("unrouted recipient %s (from %s)", r.FormValue("recipient"), sender)
+		return http.StatusOK, fmt.Sprintf("unrouted recipient %s (from %s)", recipient, sender)
 	}
 	if !s.senderAllowed(sender) {
 		return http.StatusOK, "sender not allowed " + sender
@@ -83,14 +96,14 @@ func (s *Service) receive(r *http.Request) (status int, reason string) {
 	files = s.processable(operation, files)
 	switch len(files) {
 	case 0:
-		return http.StatusOK, fmt.Sprintf("no attachment %s can process (from %s)", operation, sender)
+		return http.StatusOK, fmt.Sprintf("no attachment %s can process (to %s from %s)", operation, recipient, sender)
 	case 1:
 	default:
-		return http.StatusOK, fmt.Sprintf("ignoring message with %d processable attachments; one per email (from %s)", len(files), sender)
+		return http.StatusOK, fmt.Sprintf("ignoring message with %d processable attachments; one per email (to %s from %s)", len(files), recipient, sender)
 	}
 
 	if !s.withinSizeLimit(files) {
-		return http.StatusBadRequest, "attachment exceeds size limit (from " + sender + ")"
+		return http.StatusBadRequest, fmt.Sprintf("attachment exceeds size limit (to %s from %s)", recipient, sender)
 	}
 
 	if err := s.intake(r, operation, files); err != nil {
@@ -112,6 +125,25 @@ func parseForm(r *http.Request) error {
 		return r.ParseMultipartForm(defaultMaxBytes)
 	}
 	return r.ParseForm()
+}
+
+// declaredAttachments reports how many attachments Mailgun says the message
+// carried, which is not the same as how many actually arrived. A forwarded
+// message reports attachment-count; a stored one lists them as JSON instead.
+// Either shape, paired with no inline parts, means the bytes were not sent.
+func declaredAttachments(r *http.Request) int {
+	if n, err := strconv.Atoi(r.FormValue("attachment-count")); err == nil && n > 0 {
+		return n
+	}
+	raw := r.FormValue("attachments")
+	if raw == "" {
+		return 0
+	}
+	var stored []json.RawMessage
+	if err := json.Unmarshal([]byte(raw), &stored); err != nil {
+		return 0
+	}
+	return len(stored)
 }
 
 // attachments returns the attachment file parts (attachment-1, attachment-2,
