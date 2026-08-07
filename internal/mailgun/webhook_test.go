@@ -10,6 +10,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strconv"
 	"strings"
 	"testing"
@@ -137,6 +138,79 @@ func TestWebhookLogsSenderOnAccept(t *testing.T) {
 	}
 }
 
+// A message that says it carried attachments but posted none inline is the
+// signature of a Mailgun route using store(notify=) instead of forward(url):
+// the bytes stay in Mailgun's storage and only metadata arrives. Every real
+// submission would silently vanish, and the resulting request looks exactly
+// like an ordinary no-attachment email — so it has to be called out by name.
+func TestWebhookWarnsWhenAttachmentsAreDeclaredButNotPosted(t *testing.T) {
+	logger, buf := captureLogger()
+	s := &Service{engine: newFakeEngine(), signKey: "key", maxBytes: 1024,
+		routes: map[string]string{"workerlist@mill.keywind.cc": "workerlist"}, allowed: map[string]bool{}, log: logger}
+	ts, token, sig := signedFields(s.signKey)
+	body := "timestamp=" + ts + "&token=" + token + "&signature=" + sig +
+		"&recipient=workerlist%40mill.keywind.cc&sender=someone%40example.com&attachment-count=2"
+	r := httptest.NewRequest(http.MethodPost, "/mailgun-webhook", strings.NewReader(body))
+	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	w := httptest.NewRecorder()
+	s.handle(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("got %d, want 200 (retrying cannot fix a route misconfiguration)", w.Code)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "store(notify") {
+		t.Errorf("the warning must name the likely cause; got %q", out)
+	}
+	if !strings.Contains(out, "workerlist@mill.keywind.cc") || !strings.Contains(out, "someone@example.com") {
+		t.Errorf("the warning must name the recipient and sender; got %q", out)
+	}
+}
+
+// Mailgun's stored-message payload lists attachments as JSON rather than
+// sending an attachment-count, so that shape must trip the same warning.
+func TestWebhookWarnsOnStoredAttachmentsJSON(t *testing.T) {
+	logger, buf := captureLogger()
+	s := &Service{engine: newFakeEngine(), signKey: "key", maxBytes: 1024,
+		routes: map[string]string{"workerlist@mill.keywind.cc": "workerlist"}, allowed: map[string]bool{}, log: logger}
+	ts, token, sig := signedFields(s.signKey)
+	attachments := url.QueryEscape(`[{"url":"https://storage.mailgun.net/v3/domains/x/messages/y/attachments/0","name":"schedule.pdf"}]`)
+	body := "timestamp=" + ts + "&token=" + token + "&signature=" + sig +
+		"&recipient=workerlist%40mill.keywind.cc&sender=someone%40example.com&attachments=" + attachments
+	r := httptest.NewRequest(http.MethodPost, "/mailgun-webhook", strings.NewReader(body))
+	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	w := httptest.NewRecorder()
+	s.handle(w, r)
+
+	if !strings.Contains(buf.String(), "store(notify") {
+		t.Errorf("a stored-attachments payload must trip the warning; got %q", buf.String())
+	}
+}
+
+// A genuinely empty message is routine, so it must not raise the alarm — but it
+// still says who it was from and to. Logging nothing at all made an ordinary
+// test unverifiable: silence looked identical to the message never arriving.
+func TestWebhookRecordsPlainEmptyMessageWithoutWarning(t *testing.T) {
+	logger, buf := captureLogger()
+	s := &Service{engine: newFakeEngine(), signKey: "key", maxBytes: 1024,
+		routes: map[string]string{"excel@mill.keywind.cc": "workerlist"}, allowed: map[string]bool{}, log: logger}
+	ts, token, sig := signedFields(s.signKey)
+	body := "timestamp=" + ts + "&token=" + token + "&signature=" + sig +
+		"&recipient=excel%40mill.keywind.cc&sender=someone%40example.com"
+	r := httptest.NewRequest(http.MethodPost, "/mailgun-webhook", strings.NewReader(body))
+	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	w := httptest.NewRecorder()
+	s.handle(w, r)
+
+	out := buf.String()
+	if strings.Contains(out, "store(notify") {
+		t.Errorf("an ordinary empty message must not raise the route warning; got %q", out)
+	}
+	if !strings.Contains(out, "excel@mill.keywind.cc") {
+		t.Errorf("the outcome must name the recipient so a test can be confirmed; got %q", out)
+	}
+}
+
 // pdfRouteService returns a Service routing workerlist@ to an engine that only
 // accepts .pdf — the shape the attachment-count rule is written against.
 func pdfRouteService(engine *fakeEngine, logger *log.Logger) *Service {
@@ -174,6 +248,9 @@ func TestWebhookIgnoresEmailWithTwoAcceptableAttachments(t *testing.T) {
 	if !strings.Contains(buf.String(), "sender@example.com") {
 		t.Errorf("the drop must name the sender; got %q", buf.String())
 	}
+	if !strings.Contains(buf.String(), "workerlist@mill.keywind.cc") {
+		t.Errorf("the drop must name the recipient; got %q", buf.String())
+	}
 }
 
 // An inline signature logo rides along as an extra attachment part. Counting
@@ -204,7 +281,8 @@ func TestWebhookIgnoresUnprocessableAttachmentsWhenCounting(t *testing.T) {
 // (200, so Mailgun stops) without creating a job.
 func TestWebhookDropsEmailWithNoAcceptableAttachment(t *testing.T) {
 	engine := newFakeEngine()
-	s := pdfRouteService(engine, discardLogger())
+	logger, buf := captureLogger()
+	s := pdfRouteService(engine, logger)
 	r := signedMultipart(t, s.signKey,
 		map[string]string{"recipient": "workerlist@mill.keywind.cc", "sender": "sender@example.com"},
 		map[string][]byte{"attachment-1": []byte("logo bytes")},
@@ -217,6 +295,11 @@ func TestWebhookDropsEmailWithNoAcceptableAttachment(t *testing.T) {
 	}
 	if engine.submitCount != 0 {
 		t.Errorf("no job may be submitted; got %d", engine.submitCount)
+	}
+	// Two addresses can share one operation, so the operation alone does not
+	// identify where the mail was sent.
+	if !strings.Contains(buf.String(), "workerlist@mill.keywind.cc") {
+		t.Errorf("the drop must name the recipient, not just the operation; got %q", buf.String())
 	}
 }
 
