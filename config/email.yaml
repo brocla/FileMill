@@ -1,6 +1,7 @@
 routes:
-  workerlist@mill.keywind.cc: workerlist
-  iwk@mill.keywind.cc: workerlist
+  workerlist@mill.keywind.cc: workerlist_sheets
+  iwk@mill.keywind.cc: workerlist_sheets
+  excel@mill.keywind.cc: workerlist_excel
 allowed_senders: []
 max_attachment_bytes: 20971520
 # Timeout for an outbound Mailgun send (reply). Bounds a hung connection so it

@@ -5,9 +5,20 @@ transformers:
     extensions:
       - txt
 
-  - operation: workerlist
+  - operation: workerlist_excel
     command:
       - 'C:\Users\micro\source\repos\workerlist\.venv\Scripts\python.exe'
       - 'C:\Users\micro\source\repos\workerlist\workerlist.py'
+    options:
+      layout: excel
+    extensions:
+      - pdf
+
+  - operation: workerlist_sheets
+    command:
+      - 'C:\Users\micro\source\repos\workerlist\.venv\Scripts\python.exe'
+      - 'C:\Users\micro\source\repos\workerlist\workerlist.py'
+    options:
+      layout: sheets
     extensions:
       - pdf
