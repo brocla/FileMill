@@ -49,6 +49,57 @@ func TestSweepDeletesExpiredFilesOnly(t *testing.T) {
 	}
 }
 
+// Retention runs unattended on a daily timer and deletes user data. If it only
+// ever logged failures, silence would be indistinguishable from a sweep that
+// never ran, so a sweep that actually deleted something says so.
+func TestSweepLogsWhatItDeleted(t *testing.T) {
+	f := newDeliveryFixture(t)
+	old := time.Now().UTC().Add(-31 * 24 * time.Hour)
+	f.age(1, 0, "old-one", old)
+	f.age(2, 0, "old-two", old)
+
+	if err := f.service.sweepExpired(context.Background()); err != nil {
+		t.Fatalf("sweepExpired: %v", err)
+	}
+
+	out := f.logs.String()
+	if strings.Count(out, "\n") != 1 {
+		t.Fatalf("want exactly one summary line; got %q", out)
+	}
+	if !strings.Contains(out, "2") {
+		t.Errorf("the summary must say how many files went; got %q", out)
+	}
+}
+
+// Nothing expired means nothing to say. A line every day on a healthy system is
+// how a real one stops being read.
+func TestSweepIsSilentWhenNothingExpired(t *testing.T) {
+	f := newDeliveryFixture(t)
+	f.age(1, 0, "fresh-file", time.Now().UTC().Add(-2*24*time.Hour))
+
+	if err := f.service.sweepExpired(context.Background()); err != nil {
+		t.Fatalf("sweepExpired: %v", err)
+	}
+	if f.logs.String() != "" {
+		t.Errorf("an idle sweep must log nothing; got %q", f.logs.String())
+	}
+}
+
+// A sweep where every delete failed has deleted nothing, so it must not claim a
+// success alongside its failure lines.
+func TestSweepDoesNotClaimDeletionsItDidNotMake(t *testing.T) {
+	f := newDeliveryFixture(t)
+	f.age(1, 0, "stuck-file", time.Now().UTC().Add(-31*24*time.Hour))
+	f.publisher.deleteErr = fmt.Errorf("drive unavailable")
+
+	if err := f.service.sweepExpired(context.Background()); err != nil {
+		t.Fatalf("sweepExpired: %v", err)
+	}
+	if strings.Contains(f.logs.String(), "deleted 1") {
+		t.Errorf("nothing was deleted; the log must not say otherwise: %q", f.logs.String())
+	}
+}
+
 // A record already swept must not be offered again — otherwise every sweep
 // would re-delete the same files forever.
 func TestSweepDoesNotRepeatItself(t *testing.T) {

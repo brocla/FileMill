@@ -3,7 +3,7 @@ routes:
   iwk@mill.keywind.cc: workerlist_sheets
   excel@mill.keywind.cc: workerlist_excel
 # How the reply for each address is delivered. Absent means "email": the output
-# file is attached, which is what every route does today.
+# file is attached, which is what workerlist@ and excel@ do.
 #
 #   sheets-link  upload the output to Google Drive, convert it to a Google
 #                Sheet shared with anyone who has the link, and reply with the
