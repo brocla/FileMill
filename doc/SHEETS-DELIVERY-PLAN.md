@@ -1,6 +1,11 @@
 # Sheets-Link Delivery — Implementation Plan
 
-**Status:** planned, not started. Written after the design discussion of 2026-08-07.
+**Status:** designed; **code not started.** Google Cloud + OAuth setup is
+**complete and validated** (2026-08-07) — all three `GOOGLE_OAUTH_*` env vars set,
+and the full chain proven end to end: consent → code exchange → refresh token →
+headless access-token refresh (scope `drive.file`). Workerlist's Excel/Sheets
+layout support is now merged to workerlist `main`. Written as a durable handoff
+for a fresh context.
 
 ## Goal
 
@@ -138,25 +143,33 @@ daily) that finds stored records older than 30 days, calls `Publisher.Delete`,
 and removes/flags the record. Idempotent: a delete that 404s (already gone) is
 success. Runs only in continuous worker mode.
 
-## OAuth setup (out-of-band, operator action)
+## OAuth setup — COMPLETE (2026-08-07)
 
-- One-time **interactive browser consent** by the operator to mint the refresh
-  token; store it locally (Drive secrets belong in the environment, like the
-  existing Mailgun keys in [mailgun/config.go](../internal/mailgun/config.go) —
-  do **not** commit tokens).
-- **Decided:** personal Gmail, OAuth app **External + published to production**
-  for a long-lived refresh token, **`drive.file` scope only** (non-sensitive →
-  no verification). Console setup: create project → enable Drive API → consent
-  screen (External, add `drive.file`, add self as test user) → Publish App →
-  create **Desktop app** OAuth client → download client id/secret.
-- Secrets via env, never committed: `GOOGLE_OAUTH_CLIENT_ID`,
-  `GOOGLE_OAUTH_CLIENT_SECRET`, `GOOGLE_OAUTH_REFRESH_TOKEN` (matching the
-  `MAILGUN_*` pattern in [mailgun/config.go](../internal/mailgun/config.go)).
-- Refresh-token bootstrap: quick via OAuth 2.0 Playground (use own credentials),
-  or the proper `filemill auth google` loopback helper (a build step).
-- **Verify against current Google docs at build time:** that `drive.file` is
-  still non-sensitive, that publishing removes the Testing 7-day token expiry,
-  and whether native Sheets count against the 15 GB quota (affects retention).
+Done and validated; the build consumes the results, it does not redo this.
+
+- **Config:** personal Gmail, OAuth app **External + published to production**,
+  **`drive.file` scope only** (per-file, app-created). Client type **Desktop
+  app**. In the current Google Auth Platform console, scopes live under **Data
+  Access** and publishing under **Audience** (the old inline "Scopes" wizard step
+  is gone).
+- **Secrets in env, never committed** (matching the `MAILGUN_*` pattern in
+  [mailgun/config.go](../internal/mailgun/config.go)): `GOOGLE_OAUTH_CLIENT_ID`,
+  `GOOGLE_OAUTH_CLIENT_SECRET`, `GOOGLE_OAUTH_REFRESH_TOKEN`. The runtime reads
+  these via `os.Getenv`; the scheduled task inherits them (a running worker needs
+  a restart to see newly-set vars).
+- **Refresh token already minted** via the Desktop client's **manual loopback
+  flow**: browser consent → copy the `code` from the failed `http://localhost`
+  redirect → exchange for tokens with curl. NOTE: the OAuth 2.0 Playground does
+  **not** work with a Desktop client (its web redirect URI is rejected →
+  `redirect_uri_mismatch`) — do not send anyone there. A `filemill auth google`
+  loopback helper is an optional future convenience for re-auth, **not** a
+  prerequisite; the token exists and refreshes today.
+- **Confirmed during setup:** published to production with `drive.file` only and
+  **no verification required** (consistent with `drive.file` being non-sensitive);
+  the refresh→access-token grant works headlessly.
+- **Still open to verify at build time:** whether the long-lived refresh token
+  survives over weeks (watch for unexpected expiry), and whether native Sheets
+  count against the 15 GB Drive quota (affects the 30-day retention math).
 
 ## Testing
 
