@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"mime/multipart"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -16,6 +17,7 @@ import (
 //	authenticSignature - proves the POST came from Mailgun and is fresh
 //	operationFor       - the recipient address is one we serve
 //	senderAllowed      - the envelope sender is permitted to submit
+//	processable        - exactly the attachments the transformer can handle
 //	withinSizeLimit    - no attachment exceeds the configured cap
 //
 // Everything an attacker must defeat lives here and nowhere else.
@@ -63,6 +65,23 @@ func (s *Service) senderAllowed(sender string) bool {
 		return true
 	}
 	return s.allowed[strings.ToLower(sender)]
+}
+
+// processable narrows a message's attachment parts to the ones the routed
+// transformer actually accepts.
+//
+// Mail carries parts we never asked for — an inline signature logo arrives as
+// just another attachment part. Counting those would make an ordinary one-PDF
+// submission look like several, so they are filtered out before the message is
+// judged, not counted against it.
+func (s *Service) processable(operation string, files []*multipart.FileHeader) []*multipart.FileHeader {
+	var keep []*multipart.FileHeader
+	for _, fh := range files {
+		if s.engine.Accepts(operation, filepath.Base(filepath.FromSlash(fh.Filename))) {
+			keep = append(keep, fh)
+		}
+	}
+	return keep
 }
 
 // withinSizeLimit reports whether every attachment is within the per-attachment

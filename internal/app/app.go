@@ -113,6 +113,25 @@ func (a *App) Submit(operation, source string) (string, error) {
 	a.log.Printf("job=%s status=queued operation=%s", id, operation)
 	return id, nil
 }
+
+// Accepts reports whether the named operation's transformer handles a file with
+// this name. The email adapter asks before submitting, so it can tell an
+// attachment that is real work from one that is incidental (a signature image).
+func (a *App) Accepts(operation, filename string) bool {
+	t, ok := a.cfg.Find(operation)
+	return ok && t.Accepts(filename)
+}
+
+// OperationOptions returns the options configured for an operation, or nil if
+// there is no such operation. The email adapter cross-checks a route's delivery
+// mode against them at startup.
+func (a *App) OperationOptions(operation string) map[string]any {
+	t, ok := a.cfg.Find(operation)
+	if !ok {
+		return nil
+	}
+	return t.Options
+}
 func (a *App) Job(id string) (store.Job, error) { return a.store.Get(id) }
 func (a *App) Outputs(id string) ([]OutputFile, error) {
 	r, err := readResult(filepath.Join(a.data, "jobs", id, "result.json"), filepath.Join(a.data, "jobs", id))
@@ -135,6 +154,18 @@ func (a *App) AddEmailJob(id int64, index int, jobID string) error {
 }
 func (a *App) PendingEmails() ([]store.EmailSubmission, error) { return a.store.PendingEmails() }
 func (a *App) MarkEmailDelivered(id int64) error               { return a.store.MarkEmailDelivered(id) }
+func (a *App) PutDelivery(submissionID int64, outputIndex int, fileID, link string) error {
+	return a.store.PutDelivery(submissionID, outputIndex, fileID, link)
+}
+func (a *App) Delivery(submissionID int64, outputIndex int) (store.Delivery, bool, error) {
+	return a.store.Delivery(submissionID, outputIndex)
+}
+func (a *App) ExpiredDeliveries(cutoff time.Time) ([]store.Delivery, error) {
+	return a.store.ExpiredDeliveries(cutoff)
+}
+func (a *App) MarkDeliveryDeleted(submissionID int64, outputIndex int) error {
+	return a.store.MarkDeliveryDeleted(submissionID, outputIndex)
+}
 func (a *App) Run(ctx context.Context, once bool) error {
 	a.log.Printf("worker started once=%t", once)
 	for {

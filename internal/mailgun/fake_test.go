@@ -5,6 +5,10 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"path/filepath"
+	"sort"
+	"strings"
+	"time"
 
 	"filemill/internal/app"
 	"filemill/internal/store"
@@ -12,6 +16,10 @@ import (
 
 // discardLogger is a no-op logger for tests that don't assert on log output.
 func discardLogger() *log.Logger { return log.New(io.Discard, "", 0) }
+
+// newTestLogger writes to the given sink, for tests that assert on log output
+// but keep their own buffer.
+func newTestLogger(w io.Writer) *log.Logger { return log.New(w, "", 0) }
 
 // captureLogger returns a logger and the buffer it writes to, so a test can
 // assert on what the webhook recorded (e.g. that a reason names the sender).
@@ -31,13 +39,22 @@ type fakeEngine struct {
 	delivered map[int64]bool
 
 	submitCount     int
-	failSubmitAfter int   // fail Submit once this many have succeeded; -1 = never
-	submitErr       error // when set, Submit fails immediately with this error
+	sources         []string // source paths passed to Submit, in order
+	failSubmitAfter int      // fail Submit once this many have succeeded; -1 = never
+	submitErr       error    // when set, Submit fails immediately with this error
+
+	// accepted lists the extensions the fake transformer accepts (".pdf").
+	// nil accepts everything, which is what most tests want.
+	accepted []string
 
 	calls []string // ordered log of mutating calls
 
-	pending []store.EmailSubmission
-	outputs map[string][]app.OutputFile
+	pending    []store.EmailSubmission
+	outputs    map[string][]app.OutputFile
+	outputsErr map[string]error // job id -> error Outputs should return
+
+	deliveries      map[deliveryKey]store.Delivery
+	sweptDeliveries map[deliveryKey]bool
 }
 
 func newFakeEngine() *fakeEngine {
@@ -48,11 +65,28 @@ func newFakeEngine() *fakeEngine {
 		delivered:       map[int64]bool{},
 		failSubmitAfter: -1,
 		outputs:         map[string][]app.OutputFile{},
+		outputsErr:      map[string]error{},
+		deliveries:      map[deliveryKey]store.Delivery{},
+		sweptDeliveries: map[deliveryKey]bool{},
 	}
+}
+
+func (f *fakeEngine) Accepts(operation, filename string) bool {
+	if f.accepted == nil {
+		return true
+	}
+	ext := strings.ToLower(filepath.Ext(filename))
+	for _, allowed := range f.accepted {
+		if ext == strings.ToLower(allowed) {
+			return true
+		}
+	}
+	return false
 }
 
 func (f *fakeEngine) Submit(operation, source string) (string, error) {
 	f.calls = append(f.calls, "Submit")
+	f.sources = append(f.sources, source)
 	if f.submitErr != nil {
 		return "", f.submitErr
 	}
@@ -98,4 +132,49 @@ func (f *fakeEngine) MarkEmailDelivered(id int64) error {
 	return nil
 }
 
-func (f *fakeEngine) Outputs(id string) ([]app.OutputFile, error) { return f.outputs[id], nil }
+func (f *fakeEngine) Outputs(id string) ([]app.OutputFile, error) {
+	if err := f.outputsErr[id]; err != nil {
+		return nil, err
+	}
+	return f.outputs[id], nil
+}
+
+// deliveryKey identifies one published output in the fake's record table.
+type deliveryKey struct {
+	submissionID int64
+	outputIndex  int
+}
+
+func (f *fakeEngine) PutDelivery(submissionID int64, outputIndex int, fileID, link string) error {
+	f.calls = append(f.calls, fmt.Sprintf("PutDelivery(%d,%d)", submissionID, outputIndex))
+	key := deliveryKey{submissionID, outputIndex}
+	if _, exists := f.deliveries[key]; exists {
+		return nil // INSERT OR IGNORE: never overwrite a link already mailed out
+	}
+	f.deliveries[key] = store.Delivery{
+		SubmissionID: submissionID, OutputIndex: outputIndex,
+		FileID: fileID, Link: link, CreatedAt: time.Now().UTC(),
+	}
+	return nil
+}
+
+func (f *fakeEngine) Delivery(submissionID int64, outputIndex int) (store.Delivery, bool, error) {
+	d, ok := f.deliveries[deliveryKey{submissionID, outputIndex}]
+	return d, ok, nil
+}
+
+func (f *fakeEngine) ExpiredDeliveries(cutoff time.Time) ([]store.Delivery, error) {
+	var out []store.Delivery
+	for key, d := range f.deliveries {
+		if !f.sweptDeliveries[key] && d.CreatedAt.Before(cutoff) {
+			out = append(out, d)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].SubmissionID < out[j].SubmissionID })
+	return out, nil
+}
+
+func (f *fakeEngine) MarkDeliveryDeleted(submissionID int64, outputIndex int) error {
+	f.sweptDeliveries[deliveryKey{submissionID, outputIndex}] = true
+	return nil
+}

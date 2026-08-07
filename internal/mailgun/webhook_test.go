@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"log"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
@@ -62,7 +63,7 @@ func TestWebhookRejectsForgedRequest(t *testing.T) {
 }
 
 func TestWebhookRejectsOversizeAttachment(t *testing.T) {
-	s := &Service{signKey: "key", maxBytes: 2, routes: map[string]string{"workerlist@mill.keywind.cc": "workerlist"}, allowed: map[string]bool{}, log: discardLogger()}
+	s := &Service{engine: newFakeEngine(), signKey: "key", maxBytes: 2, routes: map[string]string{"workerlist@mill.keywind.cc": "workerlist"}, allowed: map[string]bool{}, log: discardLogger()}
 	r := signedMultipart(t, s.signKey,
 		map[string]string{"recipient": "workerlist@mill.keywind.cc"},
 		map[string][]byte{"attachment-1": []byte("too large")})
@@ -136,9 +137,93 @@ func TestWebhookLogsSenderOnAccept(t *testing.T) {
 	}
 }
 
+// pdfRouteService returns a Service routing workerlist@ to an engine that only
+// accepts .pdf — the shape the attachment-count rule is written against.
+func pdfRouteService(engine *fakeEngine, logger *log.Logger) *Service {
+	engine.accepted = []string{".pdf"}
+	return &Service{
+		engine:   engine,
+		signKey:  "key",
+		maxBytes: 1024,
+		routes:   map[string]string{"workerlist@mill.keywind.cc": "workerlist"},
+		allowed:  map[string]bool{},
+		log:      logger,
+	}
+}
+
+// One email carries one unit of work. Two processable attachments are ambiguous
+// — which output would the reply be? — so the message is dropped with a log line
+// and no reply, rather than silently producing two jobs.
+func TestWebhookIgnoresEmailWithTwoAcceptableAttachments(t *testing.T) {
+	engine := newFakeEngine()
+	logger, buf := captureLogger()
+	s := pdfRouteService(engine, logger)
+	r := signedMultipart(t, s.signKey,
+		map[string]string{"recipient": "workerlist@mill.keywind.cc", "sender": "sender@example.com"},
+		map[string][]byte{"attachment-1": []byte("pdf one"), "attachment-2": []byte("pdf two")},
+		map[string]string{"attachment-1": "first.pdf", "attachment-2": "second.pdf"})
+	w := httptest.NewRecorder()
+	s.handle(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("got %d, want 200 (dropped, not retried)", w.Code)
+	}
+	if engine.submitCount != 0 {
+		t.Errorf("no job may be submitted; got %d", engine.submitCount)
+	}
+	if !strings.Contains(buf.String(), "sender@example.com") {
+		t.Errorf("the drop must name the sender; got %q", buf.String())
+	}
+}
+
+// An inline signature logo rides along as an extra attachment part. Counting
+// every part would drop an ordinary one-PDF submission, so only attachments the
+// route's transformer accepts are counted — the rest are ignored as noise.
+func TestWebhookIgnoresUnprocessableAttachmentsWhenCounting(t *testing.T) {
+	engine := newFakeEngine()
+	s := pdfRouteService(engine, discardLogger())
+	r := signedMultipart(t, s.signKey,
+		map[string]string{"recipient": "workerlist@mill.keywind.cc", "sender": "sender@example.com"},
+		map[string][]byte{"attachment-1": []byte("logo bytes"), "attachment-2": []byte("pdf")},
+		map[string]string{"attachment-1": "signature-logo.png", "attachment-2": "schedule.pdf"})
+	w := httptest.NewRecorder()
+	s.handle(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("got %d, want 200", w.Code)
+	}
+	if engine.submitCount != 1 {
+		t.Fatalf("exactly the PDF must be submitted; got %d submissions", engine.submitCount)
+	}
+	if !strings.HasSuffix(engine.sources[0], "schedule.pdf") {
+		t.Errorf("the PDF must be the submitted file; got %q", engine.sources[0])
+	}
+}
+
+// Nothing the transformer can process means there is nothing to do: drop it
+// (200, so Mailgun stops) without creating a job.
+func TestWebhookDropsEmailWithNoAcceptableAttachment(t *testing.T) {
+	engine := newFakeEngine()
+	s := pdfRouteService(engine, discardLogger())
+	r := signedMultipart(t, s.signKey,
+		map[string]string{"recipient": "workerlist@mill.keywind.cc", "sender": "sender@example.com"},
+		map[string][]byte{"attachment-1": []byte("logo bytes")},
+		map[string]string{"attachment-1": "signature-logo.png"})
+	w := httptest.NewRecorder()
+	s.handle(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("got %d, want 200", w.Code)
+	}
+	if engine.submitCount != 0 {
+		t.Errorf("no job may be submitted; got %d", engine.submitCount)
+	}
+}
+
 // signedMultipart builds a signed multipart webhook request with the given form
-// fields and attachments (field name -> content).
-func signedMultipart(t *testing.T, signKey string, fields map[string]string, files map[string][]byte) *http.Request {
+// fields and attachments (field name -> content). An optional filenames map
+// overrides the part filename, which the attachment-count rule matches on.
+func signedMultipart(t *testing.T, signKey string, fields map[string]string, files map[string][]byte, filenames ...map[string]string) *http.Request {
 	t.Helper()
 	ts, token, sig := signedFields(signKey)
 	var body bytes.Buffer
@@ -150,7 +235,13 @@ func signedMultipart(t *testing.T, signKey string, fields map[string]string, fil
 		_ = w.WriteField(k, v)
 	}
 	for name, content := range files {
-		part, err := w.CreateFormFile(name, name)
+		filename := name
+		if len(filenames) > 0 {
+			if override, ok := filenames[0][name]; ok {
+				filename = override
+			}
+		}
+		part, err := w.CreateFormFile(name, filename)
 		if err != nil {
 			t.Fatal(err)
 		}
