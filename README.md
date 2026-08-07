@@ -76,6 +76,24 @@ To restart the whole chain (supervisor + worker) cleanly instead:
 Stop-ScheduledTask -TaskName 'FileMill Worker'; Start-ScheduledTask -TaskName 'FileMill Worker'
 ```
 
+### Deploy a code change (rebuild the binary)
+
+Editing the YAML above only needs a config reload because the *same* binary re-reads the files at startup. Changing Go code is different: the new behavior lives in a rebuilt `bin\filemill.exe`, and that makes the config-reload trick the **wrong** tool. Windows won't let you overwrite the executable while the worker holds it open, and if you kill just the worker the supervisor immediately relaunches the **old** binary before you can rebuild. So stop the whole chain, rebuild, then start it again:
+
+```powershell
+Stop-ScheduledTask -TaskName 'FileMill Worker'
+go build -o bin\filemill.exe ./cmd/filemill
+Start-ScheduledTask -TaskName 'FileMill Worker'
+```
+
+`Stop-ScheduledTask` ends the supervisor and worker cleanly and releases the exe lock; the build overwrites the binary; `Start-ScheduledTask` launches a fresh supervised chain on the new code. Confirm it came up by checking `data\logs\filemill.log` for a new `FileMill … — webhook listening on :8080` line. Because a fresh start also re-reads the YAML, this one sequence covers any change that touches code, with or without config.
+
+If `go build` fails with a file-lock or permission error, the worker didn't actually stop and is still holding `bin\filemill.exe`. Force it down, then rebuild and start:
+
+```powershell
+Get-Process filemill | Stop-Process -Force
+```
+
 ## Transformer contract
 
 FileMill runs the configured `command` in a job workspace and appends `job.json`. A transformer reads `job.json`, treats `input/` as read-only, writes artifacts only in `output/`, then writes `result.json` in the workspace. Both files carry `contract_version: "1"`.

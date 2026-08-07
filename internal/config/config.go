@@ -13,9 +13,10 @@ type Config struct {
 	Transformers []Transformer `yaml:"transformers"`
 }
 type Transformer struct {
-	Operation  string   `yaml:"operation"`
-	Command    []string `yaml:"command"`
-	Extensions []string `yaml:"extensions"`
+	Operation  string         `yaml:"operation"`
+	Command    []string       `yaml:"command"`
+	Extensions []string       `yaml:"extensions"`
+	Options    map[string]any `yaml:"options"` // passed through into each job's job.json
 }
 
 func Load(path string) (Config, error) {

@@ -4,3 +4,4 @@
 /.gomodcache/
 /.gopath/
 *.exe
+/doc/DATA-FLOW.md
