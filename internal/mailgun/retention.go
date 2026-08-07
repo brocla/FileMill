@@ -45,6 +45,11 @@ func (s *Service) SweepExpired(ctx context.Context) {
 // tries again; one unreachable file must not strand the rest of the batch. The
 // delete itself is idempotent — a file already gone counts as deleted — so a
 // record marked after a crash-interrupted sweep is never a problem.
+//
+// A sweep that deleted something says so. Retention runs unattended, on a daily
+// timer, and removes other people's data: if only failures were logged, a sweep
+// that never ran would look exactly like a sweep with nothing to do. Silence is
+// kept for the idle case, so the line means something when it does appear.
 func (s *Service) sweepExpired(ctx context.Context) error {
 	if s.publisher == nil {
 		return nil // no link delivery configured, so nothing was ever published
@@ -53,14 +58,19 @@ func (s *Service) sweepExpired(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	deleted := 0
 	for _, record := range expired {
 		if err := s.publisher.Delete(ctx, record.FileID); err != nil {
 			s.log.Printf("retention sweep: delete %s (submission %d): %v", record.FileID, record.SubmissionID, err)
 			continue
 		}
+		deleted++
 		if err := s.engine.MarkDeliveryDeleted(record.SubmissionID, record.OutputIndex); err != nil {
 			s.log.Printf("retention sweep: record deletion of %s: %v", record.FileID, err)
 		}
+	}
+	if deleted > 0 {
+		s.log.Printf("retention sweep: deleted %d published file(s) older than %d days", deleted, int(retentionPeriod.Hours()/24))
 	}
 	return nil
 }
