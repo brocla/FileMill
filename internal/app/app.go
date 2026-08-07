@@ -93,7 +93,13 @@ func (a *App) Submit(operation, source string) (string, error) {
 	if err := copyFile(source, filepath.Join(input, name)); err != nil {
 		return "", err
 	}
-	j := contract.Job{ContractVersion: contract.Version, JobID: id, Operation: operation, InputFiles: []contract.InputFile{{Path: filepath.ToSlash(filepath.Join("input", name)), Name: name}}, OutputDirectory: "output", Options: map[string]any{}}
+	// A transformer's configured options flow into every job it runs. Default a
+	// nil map to an empty object so optionless transformers keep seeing "{}".
+	options := t.Options
+	if options == nil {
+		options = map[string]any{}
+	}
+	j := contract.Job{ContractVersion: contract.Version, JobID: id, Operation: operation, InputFiles: []contract.InputFile{{Path: filepath.ToSlash(filepath.Join("input", name)), Name: name}}, OutputDirectory: "output", Options: options}
 	b, err := json.MarshalIndent(j, "", "  ")
 	if err != nil {
 		return "", err
