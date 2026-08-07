@@ -24,6 +24,7 @@ type fakePublisher struct {
 	deleted   []string // file ids passed to Delete, in order
 	nextID    int
 	err       error // when set, Publish fails with it
+	failAfter int   // fail Publish once this many have succeeded; 0 = never
 	deleteErr error // when set, Delete fails with it
 }
 
@@ -31,6 +32,9 @@ func (p *fakePublisher) Publish(_ context.Context, path, name string) (string, s
 	p.published = append(p.published, path)
 	if p.err != nil {
 		return "", "", p.err
+	}
+	if p.failAfter > 0 && p.nextID >= p.failAfter {
+		return "", "", fmt.Errorf("drive quota exceeded")
 	}
 	p.nextID++
 	id := fmt.Sprintf("drive-file-%d", p.nextID)
@@ -128,16 +132,19 @@ func newDeliveryFixture(t *testing.T) *deliveryFixture {
 	}
 }
 
-// addSubmission registers a finished submission whose single job produced one
-// output file, and returns nothing — tests read results off the fixture.
-func (f *deliveryFixture) addSubmission(t *testing.T, id int64, recipient, outputName string) {
+// addSubmission registers a finished submission whose single job produced the
+// named output files — usually one, but a job may declare several.
+func (f *deliveryFixture) addSubmission(t *testing.T, id int64, recipient string, outputNames ...string) {
 	t.Helper()
 	jobID := fmt.Sprintf("job-%d", id)
-	path := filepath.Join(t.TempDir(), outputName)
-	if err := os.WriteFile(path, []byte("spreadsheet bytes"), 0644); err != nil {
-		t.Fatal(err)
+	dir := t.TempDir()
+	for _, name := range outputNames {
+		path := filepath.Join(dir, name)
+		if err := os.WriteFile(path, []byte("spreadsheet bytes"), 0644); err != nil {
+			t.Fatal(err)
+		}
+		f.engine.outputs[jobID] = append(f.engine.outputs[jobID], app.OutputFile{Name: name, Path: path})
 	}
-	f.engine.outputs[jobID] = []app.OutputFile{{Name: outputName, Path: path}}
 	f.engine.pending = append(f.engine.pending, store.EmailSubmission{
 		ID: id, Sender: fmt.Sprintf("sender%d@example.com", id), Recipient: recipient,
 		Subject: "Schedule", MessageID: fmt.Sprintf("<msg-%d@example.com>", id), Expected: 1,
@@ -210,6 +217,48 @@ func TestDeliverRetryAfterSendFailureDoesNotRepublish(t *testing.T) {
 	}
 	if !f.engine.delivered[1] {
 		t.Error("submission must be marked delivered after the successful retry")
+	}
+}
+
+// Idempotency is per output file, not per submission — which is why the record
+// is keyed on both. A job declaring two outputs that fails partway must resume
+// where it stopped: the file already in Drive is reused, only the missing one
+// is uploaded.
+func TestDeliverResumesPartiallyPublishedSubmission(t *testing.T) {
+	f := newDeliveryFixture(t)
+	f.addSubmission(t, 1, "iwk@mill.test", "morning.xlsx", "evening.xlsx")
+	f.publisher.failAfter = 1 // the first output uploads, the second does not
+
+	if err := f.service.deliverPending(context.Background()); err != nil {
+		t.Fatalf("first tick returned an error instead of skipping: %v", err)
+	}
+	if len(f.mailgun.sent) != 0 {
+		t.Fatalf("nothing may be sent until every output is published; got %+v", f.mailgun.sent)
+	}
+
+	// Drive recovers; the next tick retries the same submission.
+	f.publisher.failAfter = 0
+	if err := f.service.deliverPending(context.Background()); err != nil {
+		t.Fatalf("retry tick: %v", err)
+	}
+
+	// Three Publish attempts total: morning (ok), evening (failed), evening
+	// (ok). morning must not appear twice.
+	morning := 0
+	for _, path := range f.publisher.published {
+		if strings.HasSuffix(path, "morning.xlsx") {
+			morning++
+		}
+	}
+	if morning != 1 {
+		t.Errorf("the already-published output was uploaded %d times, want 1", morning)
+	}
+	if len(f.mailgun.sent) != 1 {
+		t.Fatalf("sent %d replies, want 1", len(f.mailgun.sent))
+	}
+	text := f.mailgun.sent[0].text
+	if !strings.Contains(text, "drive-file-1") || !strings.Contains(text, "drive-file-2") {
+		t.Errorf("the reply must carry both links; got %q", text)
 	}
 }
 
