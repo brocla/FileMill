@@ -95,13 +95,24 @@ FileMill should run under your Windows account so it can use locally installed t
 .\scripts\Start-FileMill.ps1
 ```
 
-To start it automatically whenever you sign in, run this once from your normal PowerShell session after building `bin\filemill.exe`:
+To start it automatically, run this once from an **elevated** PowerShell after building `bin\filemill.exe`:
 
 ```powershell
 .\scripts\Install-FileMillScheduledTask.ps1 -StartNow
 ```
 
-The task is named `FileMill Worker` and runs only while you are signed in. It launches a **supervisor** (`Supervise-FileMill.ps1`) that runs `filemill run` and **restarts it automatically if it crashes** — an immediate first retry, then escalating backoff (5s, 15s, 30s, 60s, 120s) for repeated rapid failures; a persistent crash-loop is logged (alerting is tracked in issue #7). A clean exit (Ctrl+C / shutdown) stops the supervisor. The worker logs to `data\logs\filemill.log`; supervisor events go to `data\logs\supervisor.log`. To remove the automatic start later (this also stops the running supervisor and worker):
+Elevation is required because the task runs with nobody logged on (see below); the script checks and tells you if you forgot.
+
+The task is named `FileMill Worker` and starts **at boot, before anyone signs in**, and again at logon as a backstop. It launches a **supervisor** (`Supervise-FileMill.ps1`) that runs `filemill run` and **restarts it automatically if it crashes** — an immediate first retry, then escalating backoff (5s, 15s, 30s, 60s, 120s) for repeated rapid failures; a persistent crash-loop is logged (alerting is tracked in issue #7). A clean exit (Ctrl+C / shutdown) stops the supervisor. The worker logs to `data\logs\filemill.log`; supervisor events go to `data\logs\supervisor.log`.
+
+Two consequences of running before logon are worth knowing:
+
+- **Secrets must be machine-scope environment variables.** A task that runs before anyone signs in has no user registry hive, so *user*-scope variables are invisible to it — and a `sheets-link` route with missing Google credentials refuses to start. Set `MAILGUN_*` and `GOOGLE_OAUTH_*` at machine scope (elevated: `[Environment]::SetEnvironmentVariable('NAME','value','Machine')`).
+- **No network identity.** The task cannot reach SMB shares as you. FileMill does not need that — it makes outbound HTTPS calls authenticated by API keys and listens on a local port — but a transformer that reads from a mapped drive would fail here.
+
+The task also overrides two Task Scheduler defaults that are wrong for a laptop: without them Windows refuses to start the task on battery and stops it the moment you unplug.
+
+To remove the automatic start later (this also stops the running supervisor and worker):
 
 ```powershell
 .\scripts\Uninstall-FileMillScheduledTask.ps1
