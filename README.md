@@ -122,9 +122,10 @@ To remove the automatic start later (this also stops the running supervisor and 
 
 `config\email.yaml` and `config\transformers.yaml` are read once at startup, so restart the worker after editing them.
 
-**Under the supervisor** (started via the scheduled task above), just stop the worker — the supervisor relaunches it immediately with the new config:
+**Under the supervisor** (started via the scheduled task above), just stop the worker — the supervisor relaunches it immediately with the new config. This needs an **elevated** PowerShell, because the worker runs in session 0 under the task's S4U principal and an unelevated `Stop-Process` on it fails with *Access is denied*:
 
 ```powershell
+# Elevated.
 Get-Process filemill | Stop-Process -Force
 ```
 
@@ -142,14 +143,24 @@ Stop-ScheduledTask -TaskName 'FileMill Worker'; Start-ScheduledTask -TaskName 'F
 
 Editing the YAML above only needs a config reload because the *same* binary re-reads the files at startup. Changing Go code is different: the new behavior lives in a rebuilt `bin\filemill.exe`, and that makes the config-reload trick the **wrong** tool. Windows won't let you overwrite the executable while the worker holds it open, and if you kill just the worker the supervisor immediately relaunches the **old** binary before you can rebuild. So stop the whole chain, rebuild, then start it again:
 
+Run the whole sequence from an **elevated** PowerShell — the worker and supervisor both run in session 0, where an unelevated `Stop-Process` fails with *Access is denied*:
+
 ```powershell
+# Elevated.
 Stop-ScheduledTask -TaskName 'FileMill Worker'
+Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" |
+  Where-Object { $_.CommandLine -match 'Supervise-FileMill' } |
+  ForEach-Object { Stop-Process -Id $_.ProcessId -Force }
 Get-Process filemill -ErrorAction SilentlyContinue | Stop-Process -Force
 go build -o bin\filemill.exe ./cmd/filemill
 Start-ScheduledTask -TaskName 'FileMill Worker'
 ```
 
-The second line is **not** optional, despite what it looks like. `Stop-ScheduledTask` reliably ends the *supervisor*, but observed behavior is that it leaves the `filemill` child running and orphaned — the task reports `Ready` while the worker is still up and still holding `bin\filemill.exe`, so the build fails with a file-lock error. Killing the orphan is safe here precisely because the supervisor is already gone: there is nothing left to relaunch the old binary. (Doing it in the other order would just trigger a reload-and-restart, which is the config-reload recipe above, not this one.)
+**Order matters: supervisors first, then the worker.** Killing the worker while any supervisor is alive is the config-reload recipe above — the supervisor immediately relaunches it, reclaiming the port and the file lock you were trying to free.
+
+`Stop-ScheduledTask` alone is not enough for either half. It leaves the `filemill` child running and orphaned (the task reports `Ready` while the worker is still up, holding `bin\filemill.exe`), and if the task was re-registered since the running instance started, it will not stop that instance's supervisor either — which is why the sequence hunts down supervisor processes explicitly rather than trusting the task to have stopped them.
+
+Verify with `Get-Process filemill` returning nothing before you build. If the build still fails with a file-lock error, something survived.
 
 Then `go build` overwrites the binary and `Start-ScheduledTask` launches a fresh supervised chain on the new code. Confirm it came up by checking `data\logs\filemill.log` for a new `FileMill … — webhook listening on :8080` line, and that `data\logs\supervisor.log` shows a matching `supervisor starting`. Because a fresh start also re-reads the YAML, this one sequence covers any change that touches code, with or without config.
 

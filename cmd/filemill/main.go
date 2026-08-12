@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -69,7 +70,12 @@ func main() {
 		}
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		defer stop()
+		// A webhook server that cannot listen takes the whole worker down with
+		// it, so cancelling this context stops the job loop too.
+		ctx, cancel := context.WithCancel(ctx)
+		defer cancel()
 		var server *http.Server
+		serverErrs := make(chan error, 1)
 		if !once {
 			mailLog := log.New(io.MultiWriter(os.Stderr, application.LogWriter()), "mailgun ", log.LstdFlags|log.LUTC)
 			mail, err := mailgun.Load(root, application, mailLog)
@@ -81,10 +87,27 @@ func main() {
 				if server.Addr == "" {
 					server.Addr = ":8080"
 				}
+				// Bind before announcing anything. A worker that cannot accept
+				// webhooks is not degraded, it is useless — but it would keep
+				// running its delivery loop against the shared database, which
+				// is how two workers once ran at once after a port collision.
+				// Job claiming survives that; delivery has no such guard. So
+				// the bind happens here, synchronously, and its failure ends
+				// the process before a single goroutine is started — leaving
+				// the supervisor's backoff to decide when to try again.
+				//
+				// Binding first also keeps the startup line honest: it is
+				// printed only once the port is actually held.
+				listener, err := net.Listen("tcp", server.Addr)
+				if err != nil {
+					fatal(fmt.Errorf("webhook server: %w", err))
+				}
 				mailLog.Printf("FileMill %s — webhook listening on %s; delivery loop started", version, server.Addr)
 				go func() {
-					if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+					if err := server.Serve(listener); err != nil && err != http.ErrServerClosed {
 						mailLog.Printf("server: %v", err)
+						serverErrs <- err
+						cancel()
 					}
 				}()
 				go mail.Deliver(ctx)
@@ -102,6 +125,14 @@ func main() {
 			shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), 10*time.Second)
 			_ = server.Shutdown(shutdownCtx)
 			cancelShutdown()
+		}
+		// Checked before runErr: when the listener is what failed, Run returns
+		// nil (it stopped because its context was cancelled), and reporting a
+		// clean stop would hide the actual cause.
+		select {
+		case err := <-serverErrs:
+			fatal(fmt.Errorf("webhook server: %w", err))
+		default:
 		}
 		if runErr != nil {
 			fatal(runErr)
