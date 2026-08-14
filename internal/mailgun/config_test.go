@@ -72,6 +72,22 @@ func TestDeliveryPairingSilentWhenCorrect(t *testing.T) {
 	}
 }
 
+// An operation with no layout option at all is a different state from one that
+// declares the wrong layout: it has a single output shape and nothing to pair
+// against. vworker is the case in hand — it takes no options — and warning
+// about it would fire on every startup with nothing for the operator to fix.
+func TestDeliveryPairingSilentWhenOperationDeclaresNoLayout(t *testing.T) {
+	logger, buf := captureLogger()
+	warnDeliveryPairing(logger,
+		map[string]string{"vwk@mill.test": "vworker"},
+		map[string]string{"vwk@mill.test": modeSheetsLink},
+		func(operation string) string { return "" })
+
+	if buf.String() != "" {
+		t.Errorf("an operation with no declared layout must not be flagged; got %q", buf.String())
+	}
+}
+
 // An email-mode route is not subject to the pairing rule at all.
 func TestDeliveryPairingIgnoresEmailRoutes(t *testing.T) {
 	logger, buf := captureLogger()
