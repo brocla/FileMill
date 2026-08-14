@@ -168,7 +168,7 @@ If the new code carries a schema change, back the database up while everything i
 Copy-Item data\filemill.db, data\filemill.db-wal, data\filemill.db-shm data\backup\
 ```
 
-Migrations run automatically on the first `Open` of the new binary and are one-way, so that copy is the rollback path.
+Migrations run automatically on the first `Open` of the new binary and are one-way, so that copy is the rollback path — and rolling back means restoring **both** the old binary and the backed-up database. An old binary against a migrated database is not a rollback: it runs constraints the schema no longer enforces, which is how duplicate rows get written rather than rejected.
 
 Then `go build` overwrites the binary and `Start-ScheduledTask` launches a fresh supervised chain on the new code. Confirm it came up by checking `data\logs\filemill.log` for a new `FileMill … — webhook listening on :8080` line, and that `data\logs\supervisor.log` shows a matching `supervisor starting`. Because a fresh start also re-reads the YAML, this one sequence covers any change that touches code, with or without config.
 
