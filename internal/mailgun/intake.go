@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 // intake turns a verified email's attachments into jobs and records the
@@ -16,8 +17,14 @@ import (
 // only after every job mapping is durable, and the delivery loop ignores any
 // submission whose expected_jobs is still zero, so a group is never delivered
 // half-built. A failure partway simply leaves the group invisible; because the
-// submission id is keyed on Message-Id, a Mailgun retry resumes the same group,
-// and EmailHasJob skips attachments already submitted so no job is duplicated.
+// submission id is keyed on Message-Id and recipient, a Mailgun retry resumes
+// the same group, and EmailHasJob skips attachments already submitted so no job
+// is duplicated.
+//
+// The recipient is part of that key because one email sent to two FileMill
+// addresses arrives as two separate deliveries sharing a Message-Id. They are
+// two units of work — each address routes to its own operation and owes its own
+// reply — and keying on the message alone silently collapsed them into one.
 //
 // The one residual window (chosen over full transactionality for simplicity) is
 // a crash between Submit and AddEmailJob: a retry would re-submit that single
@@ -31,7 +38,13 @@ func (s *Service) intake(r *http.Request, operation string, files []*multipart.F
 		idempotencyKey = "mailgun:" + r.FormValue("token")
 	}
 
-	sid, _, err := s.engine.BeginEmail(idempotencyKey, r.FormValue("sender"), r.FormValue("recipient"), r.FormValue("subject"))
+	// The submission is keyed on the pair (key, recipient), so the recipient is
+	// normalized here the way routes and delivery modes already normalize it on
+	// read. Without this, a delivery to IWK@ and its retry to iwk@ would be two
+	// submissions and the job would run twice.
+	recipient := strings.ToLower(r.FormValue("recipient"))
+
+	sid, _, err := s.engine.BeginEmail(idempotencyKey, r.FormValue("sender"), recipient, r.FormValue("subject"))
 	if err != nil {
 		return fmt.Errorf("begin submission: %w", err)
 	}
