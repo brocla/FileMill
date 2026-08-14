@@ -100,6 +100,73 @@ func TestIntakeResumeIsIdempotent(t *testing.T) {
 	}
 }
 
+// One email addressed to two FileMill addresses arrives as two deliveries
+// sharing a Message-Id. Each routes to its own operation and owes its own
+// reply, so each must become its own submission with its own job. Keyed on the
+// Message-Id alone, the second delivery found the first's submission, saw
+// attachment 0 already recorded, skipped it, and returned success having
+// created nothing — a silent no-reply.
+func TestIntakeSeparatesTwoRecipientsOfOneMessage(t *testing.T) {
+	fake := newFakeEngine()
+	s := routedService(fake)
+	s.routes["vwk@mill.keywind.cc"] = "vworker"
+
+	for _, recipient := range []string{"workerlist@mill.keywind.cc", "vwk@mill.keywind.cc"} {
+		r := signedMultipart(t, "k",
+			map[string]string{
+				"recipient":  recipient,
+				"sender":     "kevin@example.com",
+				"subject":    "dual send",
+				"Message-Id": "<one-message@example.com>",
+			},
+			map[string][]byte{"attachment-1": []byte("pdf")})
+
+		if status, _ := s.receive(r); status != http.StatusOK {
+			t.Fatalf("%s: status = %d, want 200", recipient, status)
+		}
+	}
+
+	if len(fake.subs) != 2 {
+		t.Errorf("one message to two addresses must be two submissions; got %d", len(fake.subs))
+	}
+	if fake.submitCount != 2 {
+		t.Errorf("each recipient owes a job; got %d submitted", fake.submitCount)
+	}
+	if len(fake.operations) != 2 || fake.operations[0] == fake.operations[1] {
+		t.Errorf("each recipient must run its own operation; got %v", fake.operations)
+	}
+}
+
+// A retry differs from a fan-out only by the recipient, and mail addresses are
+// case-insensitive — so the recipient is normalized before it becomes part of
+// the key. Without that, Mailgun varying the case between attempts would submit
+// the job twice and send two replies.
+func TestIntakeNormalizesRecipientCaseInTheKey(t *testing.T) {
+	fake := newFakeEngine()
+	s := routedService(fake)
+
+	for _, recipient := range []string{"workerlist@mill.keywind.cc", "WorkerList@Mill.Keywind.CC"} {
+		r := signedMultipart(t, "k",
+			map[string]string{
+				"recipient":  recipient,
+				"sender":     "kevin@example.com",
+				"Message-Id": "<retried@example.com>",
+			},
+			map[string][]byte{"attachment-1": []byte("pdf")})
+
+		if status, _ := s.receive(r); status != http.StatusOK {
+			t.Fatalf("%s: status = %d, want 200", recipient, status)
+		}
+	}
+
+	if len(fake.subs) != 1 {
+		t.Errorf("a retry with different casing must reuse the submission; got %d", len(fake.subs))
+	}
+	if fake.submitCount != 1 {
+		t.Errorf("a retry must not submit a second job; got %d", fake.submitCount)
+	}
+}
+
 // A failure creating a job is our fault, so the handler must return 500 to make
 // Mailgun retry (which then heals the submission).
 func TestIntakeSubmitFailureReturns500(t *testing.T) {

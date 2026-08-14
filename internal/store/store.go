@@ -3,6 +3,7 @@ package store
 import (
 	"database/sql"
 	"fmt"
+	"strings"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -76,10 +77,15 @@ func Open(path string) (*Store, error) {
 		db.Close()
 		return nil, err
 	}
+	// Unique on the pair, not on message_id alone: one email addressed to two
+	// FileMill addresses arrives as two deliveries sharing a Message-Id, and
+	// each is its own unit of work. A Mailgun retry repeats the recipient as
+	// well, so coalescing retries — the reason the key exists — is unaffected.
 	_, err = db.Exec(`CREATE TABLE IF NOT EXISTS email_submissions (
- id INTEGER PRIMARY KEY AUTOINCREMENT, message_id TEXT NOT NULL UNIQUE,
+ id INTEGER PRIMARY KEY AUTOINCREMENT, message_id TEXT NOT NULL,
  sender TEXT NOT NULL, recipient TEXT NOT NULL, subject TEXT NOT NULL,
- expected_jobs INTEGER NOT NULL DEFAULT 0, delivered_at TEXT
+ expected_jobs INTEGER NOT NULL DEFAULT 0, delivered_at TEXT,
+ UNIQUE(message_id, recipient)
 ); CREATE TABLE IF NOT EXISTS email_submission_jobs (
  submission_id INTEGER NOT NULL, attachment_index INTEGER NOT NULL, job_id TEXT NOT NULL UNIQUE,
  PRIMARY KEY(submission_id, attachment_index), FOREIGN KEY(submission_id) REFERENCES email_submissions(id)
@@ -100,11 +106,124 @@ func Open(path string) (*Store, error) {
 		db.Close()
 		return nil, err
 	}
+	if err := migrateSubmissionKey(db); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("migrate email_submissions: %w", err)
+	}
 	if _, err := db.Exec("UPDATE jobs SET status=?, completed_at=? WHERE status=?", StatusInterrupted, time.Now().UTC().Format(time.RFC3339Nano), StatusRunning); err != nil {
 		db.Close()
 		return nil, err
 	}
 	return s, nil
+}
+
+// migrateSubmissionKey widens an existing email_submissions from UNIQUE on
+// message_id to UNIQUE on (message_id, recipient). It is a no-op on a database
+// created by the CREATE TABLE above, so it costs one PRAGMA per start.
+//
+// The old constraint was declared inline, which SQLite cannot drop in place, so
+// this is the standard rebuild: create, copy, drop, rename, in one transaction.
+//
+// Ids are copied explicitly and that is the load-bearing part. Both child
+// tables reference email_submissions(id) and the references are unenforced
+// (foreign_keys is never turned on, and SQLite defaults it off), so letting
+// AUTOINCREMENT reassign ids would not fail — it would silently detach every
+// job and delivery from its submission.
+//
+// Rows are copied exactly as they stand, including any submission that failed
+// before its commit point (expected_jobs=0). Such a row is already invisible to
+// PendingEmails; a migration that edits data it does not have to edit is a
+// migration that can corrupt data it does not have to touch.
+func migrateSubmissionKey(db *sql.DB) error {
+	indexes, err := uniqueIndexColumns(db, "email_submissions")
+	if err != nil {
+		return err
+	}
+	stale := false
+	for _, columns := range indexes {
+		if len(columns) == 1 && columns[0] == "message_id" {
+			stale = true
+		}
+	}
+	if !stale {
+		return nil
+	}
+
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	for _, stmt := range []string{
+		`CREATE TABLE email_submissions_new (
+ id INTEGER PRIMARY KEY AUTOINCREMENT, message_id TEXT NOT NULL,
+ sender TEXT NOT NULL, recipient TEXT NOT NULL, subject TEXT NOT NULL,
+ expected_jobs INTEGER NOT NULL DEFAULT 0, delivered_at TEXT,
+ UNIQUE(message_id, recipient)
+)`,
+		`INSERT INTO email_submissions_new(id,message_id,sender,recipient,subject,expected_jobs,delivered_at)
+ SELECT id,message_id,sender,recipient,subject,expected_jobs,delivered_at FROM email_submissions`,
+		`DROP TABLE email_submissions`,
+		`ALTER TABLE email_submissions_new RENAME TO email_submissions`,
+	} {
+		if _, err := tx.Exec(stmt); err != nil {
+			return fmt.Errorf("%s: %w", strings.Fields(stmt)[0], err)
+		}
+	}
+	return tx.Commit()
+}
+
+// uniqueIndexColumns returns one column list per unique index on a table,
+// including the implicit index behind a UNIQUE constraint. Reading the shape
+// this way rather than matching text in sqlite_master keeps the migration's
+// trigger independent of how the DDL happens to be spelled.
+func uniqueIndexColumns(db *sql.DB, table string) ([][]string, error) {
+	rows, err := db.Query(fmt.Sprintf("PRAGMA index_list(%q)", table))
+	if err != nil {
+		return nil, err
+	}
+	var names []string
+	for rows.Next() {
+		// seq, name, unique, origin, partial
+		var seq int
+		var name, origin string
+		var unique, partial int
+		if err := rows.Scan(&seq, &name, &unique, &origin, &partial); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		if unique == 1 {
+			names = append(names, name)
+		}
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	var indexes [][]string
+	for _, name := range names {
+		rows, err := db.Query(fmt.Sprintf("PRAGMA index_info(%q)", name))
+		if err != nil {
+			return nil, err
+		}
+		var columns []string
+		for rows.Next() {
+			var seqno, cid int
+			var column sql.NullString
+			if err := rows.Scan(&seqno, &cid, &column); err != nil {
+				rows.Close()
+				return nil, err
+			}
+			columns = append(columns, column.String)
+		}
+		rows.Close()
+		if err := rows.Err(); err != nil {
+			return nil, err
+		}
+		indexes = append(indexes, columns)
+	}
+	return indexes, nil
 }
 func (s *Store) BeginEmail(messageID, sender, recipient, subject string) (int64, bool, error) {
 	res, err := s.db.Exec("INSERT OR IGNORE INTO email_submissions(message_id,sender,recipient,subject) VALUES(?,?,?,?)", messageID, sender, recipient, subject)
@@ -113,7 +232,7 @@ func (s *Store) BeginEmail(messageID, sender, recipient, subject string) (int64,
 	}
 	n, _ := res.RowsAffected()
 	var id int64
-	err = s.db.QueryRow("SELECT id FROM email_submissions WHERE message_id=?", messageID).Scan(&id)
+	err = s.db.QueryRow("SELECT id FROM email_submissions WHERE message_id=? AND recipient=?", messageID, recipient).Scan(&id)
 	return id, n == 1, err
 }
 func (s *Store) SetEmailExpected(id int64, count int) error {

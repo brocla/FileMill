@@ -22,3 +22,12 @@ transformers:
       layout: sheets
     extensions:
       - pdf
+
+  # A second transformer over the same source PDF: the one-page worker
+  # schedule rather than the three-booth grid. It takes no options.
+  - operation: vworker
+    command:
+      - 'C:\Users\micro\source\repos\workerlist\.venv\Scripts\python.exe'
+      - 'C:\Users\micro\source\repos\workerlist\vworker.py'
+    extensions:
+      - pdf

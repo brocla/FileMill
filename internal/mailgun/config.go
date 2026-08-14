@@ -178,6 +178,12 @@ func requireGoogleCredentials(delivery map[string]string, creds credentials) err
 // so this is a quality coupling rather than a hard error — but a silent slip
 // would show up only as a worse-looking spreadsheet weeks later. It logs only
 // when something is actually wrong: a warning on healthy config is noise.
+//
+// An operation that declares no layout at all is not a mismatch. Only the
+// transformers with more than one output shape carry a layout option to choose
+// between them; one like vworker, with a single shape and no options, has
+// nothing to pair against, and flagging it would warn at every startup about
+// something the operator cannot fix.
 func warnDeliveryPairing(logger *log.Logger, routes, delivery map[string]string, layoutOf func(operation string) string) {
 	for address, mode := range delivery {
 		if mode != modeSheetsLink {
@@ -188,7 +194,7 @@ func warnDeliveryPairing(logger *log.Logger, routes, delivery map[string]string,
 			logger.Printf("config warning: %s delivery is set for %s, which no route serves", mode, address)
 			continue
 		}
-		if layout := layoutOf(operation); layout != "sheets" {
+		if layout := layoutOf(operation); layout != "" && layout != "sheets" {
 			logger.Printf("config warning: %s delivery is set for %s, but its operation %s produces layout %q, not \"sheets\"", mode, address, operation, layout)
 		}
 	}

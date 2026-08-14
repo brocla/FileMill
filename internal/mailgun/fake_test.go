@@ -33,13 +33,14 @@ func captureLogger() (*log.Logger, *bytes.Buffer) {
 // tests can assert on the intake commit sequence.
 type fakeEngine struct {
 	nextSID   int64
-	subs      map[string]int64         // idempotency key -> submission id
+	subs      map[submissionKey]int64  // idempotency key + recipient -> submission id
 	jobs      map[int64]map[int]string // sid -> attachment index -> job id
 	expected  map[int64]int
 	delivered map[int64]bool
 
 	submitCount     int
 	sources         []string // source paths passed to Submit, in order
+	operations      []string // operations passed to Submit, in order
 	failSubmitAfter int      // fail Submit once this many have succeeded; -1 = never
 	submitErr       error    // when set, Submit fails immediately with this error
 
@@ -59,7 +60,7 @@ type fakeEngine struct {
 
 func newFakeEngine() *fakeEngine {
 	return &fakeEngine{
-		subs:            map[string]int64{},
+		subs:            map[submissionKey]int64{},
 		jobs:            map[int64]map[int]string{},
 		expected:        map[int64]int{},
 		delivered:       map[int64]bool{},
@@ -87,6 +88,7 @@ func (f *fakeEngine) Accepts(operation, filename string) bool {
 func (f *fakeEngine) Submit(operation, source string) (string, error) {
 	f.calls = append(f.calls, "Submit")
 	f.sources = append(f.sources, source)
+	f.operations = append(f.operations, operation)
 	if f.submitErr != nil {
 		return "", f.submitErr
 	}
@@ -97,13 +99,20 @@ func (f *fakeEngine) Submit(operation, source string) (string, error) {
 	return fmt.Sprintf("job-%d", f.submitCount), nil
 }
 
+// submissionKey mirrors the store's uniqueness: a submission is one message to
+// one recipient. Keyed on the message alone, as this fake once was, a fan-out
+// to two addresses collapses into a single submission and the second recipient
+// silently gets no job — the bug this pair exists to prevent.
+type submissionKey struct{ messageID, recipient string }
+
 func (f *fakeEngine) BeginEmail(messageID, sender, recipient, subject string) (int64, bool, error) {
 	f.calls = append(f.calls, "BeginEmail")
-	if sid, ok := f.subs[messageID]; ok {
+	key := submissionKey{messageID, recipient}
+	if sid, ok := f.subs[key]; ok {
 		return sid, false, nil
 	}
 	f.nextSID++
-	f.subs[messageID] = f.nextSID
+	f.subs[key] = f.nextSID
 	f.jobs[f.nextSID] = map[int]string{}
 	return f.nextSID, true, nil
 }
