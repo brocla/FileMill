@@ -11,7 +11,7 @@ func routedService(engine Engine) *Service {
 		engine:   engine,
 		signKey:  "k",
 		maxBytes: 1 << 20,
-		routes:   map[string]string{"workerlist@mill.keywind.cc": "workerlist"},
+		routes:   map[string]string{"workerlist@mill.example.com": "workerlist"},
 		allowed:  map[string]bool{},
 		log:      discardLogger(),
 	}
@@ -28,7 +28,7 @@ func twoAttachmentIntake(t *testing.T, s *Service) error {
 	t.Helper()
 	r := signedMultipart(t, "k",
 		map[string]string{
-			"recipient":  "workerlist@mill.keywind.cc",
+			"recipient":  "workerlist@mill.example.com",
 			"sender":     "kevin@example.com",
 			"subject":    "Schedules",
 			"Message-Id": "<orig-1@example.com>",
@@ -109,9 +109,9 @@ func TestIntakeResumeIsIdempotent(t *testing.T) {
 func TestIntakeSeparatesTwoRecipientsOfOneMessage(t *testing.T) {
 	fake := newFakeEngine()
 	s := routedService(fake)
-	s.routes["vwk@mill.keywind.cc"] = "vworker"
+	s.routes["vwk@mill.example.com"] = "vworker"
 
-	for _, recipient := range []string{"workerlist@mill.keywind.cc", "vwk@mill.keywind.cc"} {
+	for _, recipient := range []string{"workerlist@mill.example.com", "vwk@mill.example.com"} {
 		r := signedMultipart(t, "k",
 			map[string]string{
 				"recipient":  recipient,
@@ -145,7 +145,7 @@ func TestIntakeNormalizesRecipientCaseInTheKey(t *testing.T) {
 	fake := newFakeEngine()
 	s := routedService(fake)
 
-	for _, recipient := range []string{"workerlist@mill.keywind.cc", "WorkerList@Mill.Keywind.CC"} {
+	for _, recipient := range []string{"workerlist@mill.example.com", "WorkerList@Mill.Example.COM"} {
 		r := signedMultipart(t, "k",
 			map[string]string{
 				"recipient":  recipient,
@@ -175,7 +175,7 @@ func TestIntakeSubmitFailureReturns500(t *testing.T) {
 	s := routedService(fake)
 
 	r := signedMultipart(t, "k",
-		map[string]string{"recipient": "workerlist@mill.keywind.cc", "sender": "kevin@example.com", "Message-Id": "<orig-2@example.com>"},
+		map[string]string{"recipient": "workerlist@mill.example.com", "sender": "kevin@example.com", "Message-Id": "<orig-2@example.com>"},
 		map[string][]byte{"attachment-1": []byte("one")})
 
 	status, _ := s.receive(r)

@@ -78,7 +78,7 @@ type Service struct {
 
 	signKey string // Mailgun HTTP webhook signing key — verifies inbound POSTs
 	apiKey  string // Mailgun private API key — authenticates outbound sends
-	domain  string // Mailgun sending domain, e.g. "mill.keywind.cc"
+	domain  string // Mailgun sending domain, e.g. "mill.example.com"
 	from    string // address replies are sent from
 
 	routes   map[string]string // recipient address -> transformer operation

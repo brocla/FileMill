@@ -19,11 +19,17 @@ import (
 // Absolute paths to the real workerlist transformer and a real fixture PDF.
 // The end-to-end test is environment-specific by design: it runs the genuine
 // Python transformer, so it is gated behind FILEMILL_E2E and skips cleanly
-// when the transformer or its fixture is not present on this machine.
-const (
-	workerlistRepo = `C:\Users\micro\source\repos\workerlist`
-	fixturePDF     = workerlistRepo + `\tests\fixtures\sample_schedule.pdf`
-)
+// when the transformer or its fixture is not present on this machine. The
+// repo path is machine-specific, so it comes from FILEMILL_WORKERLIST_REPO
+// with a placeholder default that simply won't exist on most machines.
+var workerlistRepo = func() string {
+	if p := os.Getenv("FILEMILL_WORKERLIST_REPO"); p != "" {
+		return p
+	}
+	return `C:\path\to\workerlist`
+}()
+
+var fixturePDF = filepath.Join(workerlistRepo, "tests", "fixtures", "sample_schedule.pdf")
 
 // TestEndToEndThroughWorkerlist exercises the full inbound-to-outbound path:
 // a signed Mailgun webhook carrying a PDF -> App.Submit -> the worker runs the
@@ -92,7 +98,7 @@ func TestEndToEndThroughWorkerlist(t *testing.T) {
 		signKey:  "test-signing-key",
 		domain:   "mill.test",
 		from:     "filemill@mill.test",
-		routes:   map[string]string{"workerlist@mill.keywind.cc": "workerlist"},
+		routes:   map[string]string{"workerlist@mill.example.com": "workerlist"},
 		allowed:  map[string]bool{},
 		maxBytes: 20 << 20,
 		sendBase: fake.URL,
@@ -109,7 +115,7 @@ func TestEndToEndThroughWorkerlist(t *testing.T) {
 	mw := multipart.NewWriter(&body)
 	for k, v := range map[string]string{
 		"timestamp": ts, "token": token, "signature": sig,
-		"recipient":  "workerlist@mill.keywind.cc",
+		"recipient":  "workerlist@mill.example.com",
 		"sender":     "kevin@example.com",
 		"subject":    "Booth schedule",
 		"Message-Id": "<orig-123@example.com>",

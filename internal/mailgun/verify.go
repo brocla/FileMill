@@ -11,7 +11,7 @@ import (
 	"time"
 )
 
-// This file is the trust boundary. notify.keywind.cc is a public URL, so every
+// This file is the trust boundary. The webhook URL is public, so every
 // inbound request is treated as hostile until it clears these checks:
 //
 //	authenticSignature - proves the POST came from Mailgun and is fresh

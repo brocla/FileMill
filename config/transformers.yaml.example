@@ -1,0 +1,25 @@
+transformers:
+  - operation: copy_rename
+    command:
+      - "bin/copy-rename.exe"
+    extensions:
+      - txt
+
+  - operation: uppercase
+    command:
+      - "bin/uppercase.exe"
+    extensions:
+      - txt
+
+  # A transformer doesn't have to be a Go binary — "command" is just an
+  # argv, so any interpreter works the same way. This entry is a template:
+  # point it at your own script and its interpreter.
+  - operation: pdf_report
+    label: "PDF report"
+    command:
+      - 'C:\path\to\your-venv\Scripts\python.exe'
+      - 'C:\path\to\your-script\pdf_report.py'
+    options:
+      layout: sheets
+    extensions:
+      - pdf

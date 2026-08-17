@@ -1,7 +1,7 @@
 # FileMill Error Alerting — Plan
 
 Goal: when something goes **wrong** in FileMill, email an operator alert to
-`support@keywind.cc`, so an unattended background service (it runs at logon on
+`support@example.com`, so an unattended background service (it runs at logon on
 a personal laptop) doesn't fail silently.
 
 Status: **plan only, not implemented.** Written 2026-07-20.
@@ -68,7 +68,7 @@ type Reporter interface {
 ```
 
 - A **no-op reporter** is the default (alerting disabled).
-- A **Mailgun-backed reporter** emails `support@keywind.cc` via the existing
+- A **Mailgun-backed reporter** emails `support@example.com` via the existing
   send path, with throttling in front.
 - Both `*app.App` and the mailgun `Service` take a `Reporter` (constructor
   injection), so job-side and email-side systemic failures funnel to one place.
@@ -99,8 +99,8 @@ A small stateful wrapper in front of the Mailgun reporter:
 Add to `config/email.yaml` (non-secret; secrets stay in env):
 
 ```yaml
-alert_recipient: support@keywind.cc     # empty/absent => alerting disabled
-# alert_from: filemill@mill.keywind.cc   # optional; defaults to REPLY_FROM
+alert_recipient: support@example.com     # empty/absent => alerting disabled
+# alert_from: filemill@mill.example.com  # optional; defaults to REPLY_FROM
 # alert_cooldown_minutes: 15
 ```
 

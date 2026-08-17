@@ -8,8 +8,8 @@ decisions and the reasoning behind them don't have to be re-derived.
 
 **Status: COMPLETE. The Go handler (`internal/mailgun`, wired into
 `cmd/filemill run`) is built and the full pipeline was verified with a live
-email on 2026-07-20 — a real PDF to `workerlist@mill.keywind.cc` came back as
-a `schedule.xlsx` reply to the sender.**
+email on 2026-07-20 — a real PDF to `report@mill.example.com` came back as
+a `report.xlsx` reply to the sender.**
 
 > **CORRECTION (2026-07-20), read this first — it overrides several claims
 > below.** The Mailgun route action must be **`forward("<webhook URL>")`**,
@@ -20,8 +20,8 @@ a `schedule.xlsx` reply to the sender.**
 > job. `forward(<url>)` POSTs the full message as `multipart/form-data` with
 > attachments inline, which is what the handler expects. The multipart payload
 > documented in section 5 is the **forward-to-URL** shape, not store-notify.
-> Working route: expression `catch_all()` (safe — `mill.keywind.cc` is
-> dedicated to this pipeline), action `forward("https://notify.keywind.cc/mailgun-webhook")`.
+> Working route: expression `catch_all()` (safe — `mill.example.com` is
+> dedicated to this pipeline), action `forward("https://notify.example.com/mailgun-webhook")`.
 > Also observed: Mailgun route processing lagged up to ~10 minutes during
 > testing, so a delayed result is not a failure. A more robust alternative for
 > large attachments is to keep `store()` and have FileMill fetch the file from
@@ -70,20 +70,20 @@ provides that without port-forwarding.
 
 ```
 Sender
-  |  sends email to e.g. someone@mill.keywind.cc
+  |  sends email to e.g. someone@mill.example.com
   v
 Mailgun MX (mxa.mailgun.org / mxb.mailgun.org)
   |  receives via SMTP
   |  evaluates Routes
   v
-Mailgun Route match: catch_all()   [or match_recipient(".*@mill.keywind.cc")]
-  action: forward("https://notify.keywind.cc/mailgun-webhook")
+Mailgun Route match: catch_all()   [or match_recipient(".*@mill.example.com")]
+  action: forward("https://notify.example.com/mailgun-webhook")
   (NOT store(notify=...) — see CORRECTION at top; forward posts attachments inline)
   |
   |  stores the message (~3 day retention, backup only — not the primary path)
   |  AND immediately POSTs the fully parsed message as multipart/form-data
   v
-https://notify.keywind.cc/mailgun-webhook
+https://notify.example.com/mailgun-webhook
   |  DNS: CNAME to <tunnel-id>.cfargotunnel.com (Cloudflare-managed,
   |  auto-created when the tunnel's public hostname route was configured)
   v
@@ -113,18 +113,18 @@ FileMill Go process, HTTP server on :8080, handler at /mailgun-webhook
 
 ## 3. Infrastructure already configured (do not redo)
 
-- **Domain**: `keywind.cc`, registered and DNS-hosted on Cloudflare. This
-  is a test/sandbox domain, intentionally decoupled from the user's real
-  domain (whidit.com, hosted on Namecheap) so mistakes here don't risk
-  production mail. If this pipeline proves out, whidit.com can be migrated
-  later — not yet.
-- **Subdomain**: `mill.keywind.cc`, dedicated to this pipeline.
-- **DNS records for mill.keywind.cc** (all verified green in Mailgun):
+- **Domain**: `example.com`, registered and DNS-hosted on Cloudflare. This
+  is a test/sandbox domain, intentionally decoupled from the operator's real
+  production domain (hosted elsewhere) so mistakes here don't risk
+  production mail. If this pipeline proves out, the real domain can be
+  migrated later — not yet.
+- **Subdomain**: `mill.example.com`, dedicated to this pipeline.
+- **DNS records for mill.example.com** (all verified green in Mailgun):
   - 2x TXT (SPF, DKIM)
   - 2x MX -> Mailgun's inbound mail servers
   - 1x CNAME (open/click tracking) — must be "DNS only" (grey cloud), not
     proxied through Cloudflare
-  - 1x TXT DMARC at `_dmarc.mill.keywind.cc` (`p=none`, monitor-only —
+  - 1x TXT DMARC at `_dmarc.mill.example.com` (`p=none`, monitor-only —
     matters for deliverability of the *reply*, not for receiving)
   - Gotcha encountered: Cloudflare's own **DMARC Management** feature will
     silently generate and reassert a competing DMARC record with a
@@ -133,17 +133,17 @@ FileMill Go process, HTTP server on :8080, handler at /mailgun-webhook
     unexpectedly, check there first before assuming a Mailgun-side issue.
   - Gotcha encountered: Cloudflare's DNS form auto-appends the zone to
     whatever you type in the Name field. A record must be entered as
-    `_dmarc.mill` (not `_dmarc`, and not the full `_dmarc.mill.keywind.cc`)
+    `_dmarc.mill` (not `_dmarc`, and not the full `_dmarc.mill.example.com`)
     to resolve to the correct host.
-- **Mailgun**: domain `mill.keywind.cc` added and fully verified. Working
+- **Mailgun**: domain `mill.example.com` added and fully verified. Working
   route: expression `catch_all()`, action
-  `forward("https://notify.keywind.cc/mailgun-webhook")` (see CORRECTION at
+  `forward("https://notify.example.com/mailgun-webhook")` (see CORRECTION at
   top — `forward` delivers attachments inline; `store(notify=)` does not).
   Confirmed working with a real inbound email producing a reply on 2026-07-20.
 - **Cloudflare Tunnel**: `cloudflared` installed via winget, running as a
   Windows service (`cloudflared.exe service install <token>`; if it shows
   installed-but-stopped, `Start-Service Cloudflared` from an elevated
-  PowerShell fixes it). Public hostname route: `notify.keywind.cc` ->
+  PowerShell fixes it). Public hostname route: `notify.example.com` ->
   HTTP -> `localhost:8080`. Confirmed working end-to-end.
 - **Reboot/logon persistence**: `scripts/Install-FileMillScheduledTask.ps1`
   already registers a scheduled task that runs `filemill.exe run` at user
@@ -158,7 +158,7 @@ FileMill Go process, HTTP server on :8080, handler at /mailgun-webhook
 
 ## 4. Signature verification (mandatory, not optional)
 
-`notify.keywind.cc` is a public URL. Anyone who discovers it could POST
+`notify.example.com` is a public URL. Anyone who discovers it could POST
 forged data pretending to be an inbound email. Mailgun signs every notify
 POST with HMAC-SHA256 over `timestamp + token`, keyed with the Mailgun API
 key. The three fields (`token`, `timestamp`, `signature`) arrive as
@@ -218,7 +218,7 @@ Content-Disposition: form-data; name="subject"
 Re: Sample POST request
 --boundary
 Content-Disposition: form-data; name="sender"
-ross@mill.keywind.cc
+ross@mill.example.com
 --boundary
 Content-Disposition: form-data; name="stripped-text"
 Hi Alice,
@@ -226,7 +226,7 @@ This is Bob.
 I also attached a file.
 --boundary
 Content-Disposition: form-data; name="Message-Id"
-<517ACC75.5010709@mill.keywind.cc>
+<517ACC75.5010709@mill.example.com>
 --boundary
 Content-Disposition: form-data; name="attachment-1"; filename="crabby.gif"
 Content-Type: image/gif
@@ -253,7 +253,7 @@ d2b7af2849575ef0ba009e38d7fb3d3922b2ce793f10ccea58b549266d6788d1
 Mailgun's Send API, not a separate provider:
 
 ```
-POST https://api.mailgun.net/v3/mill.keywind.cc/messages
+POST https://api.mailgun.net/v3/mill.example.com/messages
 Authorization: Basic base64("api:<MAILGUN_API_KEY>")
 Content-Type: application/x-www-form-urlencoded
 
@@ -315,7 +315,7 @@ call, so one process and one scheduled task covers both.
 
 1. **How does an inbound email select which transformer/operation runs?**
    Not yet decided. Options discussed:
-   - Per-operation address (`pdf-compress@mill.keywind.cc`) — parse from
+   - Per-operation address (`pdf-compress@mill.example.com`) — parse from
      the `recipient` field.
    - Subject-line keyword/syntax.
    - Auto-detect from the attachment's file extension via the existing
@@ -338,7 +338,7 @@ call, so one process and one scheduled task covers both.
 
 ## 9. End-to-end test checklist once built
 
-- [ ] Real email with attachment to `mill.keywind.cc` (or a per-operation
+- [ ] Real email with attachment to `mill.example.com` (or a per-operation
       address, depending on decision #1) triggers a job via `app.Submit`
 - [ ] Job appears in `data/jobs/<id>/` with correct input file
 - [ ] Job transitions queued -> running -> succeeded in the store

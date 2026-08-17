@@ -96,7 +96,7 @@
 <body>
 
 <h1>FileMill Email Pipeline</h1>
-<p class="subtitle">How Cloudflare, Mailgun, the Tunnel, mill.keywind.cc, and FileMill fit together</p>
+<p class="subtitle">How Cloudflare, Mailgun, the Tunnel, mill.example.com, and FileMill fit together</p>
 
 <div class="diagram-wrap">
 <svg viewBox="0 0 940 900" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system, Segoe UI, Helvetica, Arial, sans-serif">
@@ -117,19 +117,19 @@
 
   <!-- Arrow 1: sender -> Cloudflare DNS zone -->
   <line x1="470" y1="70" x2="470" y2="110" stroke="#475569" stroke-width="1.5" marker-end="url(#arrow)"/>
-  <text x="490" y="94" font-size="11.5" fill="#334155">1. SMTP to someone@mill.keywind.cc</text>
+  <text x="490" y="94" font-size="11.5" fill="#334155">1. SMTP to someone@mill.example.com</text>
 
   <!-- Cloudflare DNS zone box -->
   <rect x="150" y="112" width="640" height="110" rx="10" fill="#fff7ed" stroke="#f38020" stroke-width="1.5"/>
-  <text x="470" y="134" text-anchor="middle" font-size="14" font-weight="700" fill="#c2410c">Cloudflare DNS — keywind.cc zone</text>
+  <text x="470" y="134" text-anchor="middle" font-size="14" font-weight="700" fill="#c2410c">Cloudflare DNS — example.com zone</text>
 
   <rect x="175" y="150" width="270" height="58" rx="8" fill="#ffffff" stroke="#fdba74"/>
-  <text x="310" y="170" text-anchor="middle" font-size="12" font-weight="600" fill="#1e293b">mill.keywind.cc</text>
+  <text x="310" y="170" text-anchor="middle" font-size="12" font-weight="600" fill="#1e293b">mill.example.com</text>
   <text x="310" y="186" text-anchor="middle" font-size="10.5" fill="#64748b">MX / SPF / DKIM / DMARC</text>
   <text x="310" y="199" text-anchor="middle" font-size="10.5" fill="#64748b">→ points to Mailgun</text>
 
   <rect x="495" y="150" width="270" height="58" rx="8" fill="#ffffff" stroke="#fdba74"/>
-  <text x="630" y="170" text-anchor="middle" font-size="12" font-weight="600" fill="#1e293b">notify.keywind.cc</text>
+  <text x="630" y="170" text-anchor="middle" font-size="12" font-weight="600" fill="#1e293b">notify.example.com</text>
   <text x="630" y="186" text-anchor="middle" font-size="10.5" fill="#64748b">CNAME → &lt;tunnel-id&gt;.cfargotunnel.com</text>
   <text x="630" y="199" text-anchor="middle" font-size="10.5" fill="#64748b">→ points to the Tunnel</text>
 
@@ -141,20 +141,20 @@
   <rect x="150" y="264" width="320" height="130" rx="10" fill="#fef2f2" stroke="#c02128" stroke-width="1.5"/>
   <text x="310" y="288" text-anchor="middle" font-size="14" font-weight="700" fill="#b91c1c">Mailgun</text>
   <text x="310" y="308" text-anchor="middle" font-size="11" fill="#334155">Receives via SMTP (mxa/mxb.mailgun.org)</text>
-  <text x="310" y="325" text-anchor="middle" font-size="11" fill="#334155">Route: match_recipient(".*@mill.keywind.cc")</text>
+  <text x="310" y="325" text-anchor="middle" font-size="11" fill="#334155">Route: match_recipient(".*@mill.example.com")</text>
   <text x="310" y="342" text-anchor="middle" font-size="11" fill="#334155">Action: store() + notify()</text>
   <text x="310" y="365" text-anchor="middle" font-size="10.5" fill="#64748b">also: outbound Send API</text>
   <text x="310" y="380" text-anchor="middle" font-size="10.5" fill="#64748b">(reply path, step 5)</text>
 
-  <!-- Arrow 2: Mailgun -> Cloudflare Tunnel edge, via notify.keywind.cc -->
+  <!-- Arrow 2: Mailgun -> Cloudflare Tunnel edge, via notify.example.com -->
   <path d="M 470 330 C 560 330, 560 250, 630 222" fill="none" stroke="#475569" stroke-width="1.5" marker-end="url(#arrow)"/>
-  <text x="560" y="270" font-size="11.5" fill="#334155">2. POST https://notify.keywind.cc/mailgun-webhook</text>
+  <text x="560" y="270" font-size="11.5" fill="#334155">2. POST https://notify.example.com/mailgun-webhook</text>
   <text x="560" y="284" font-size="10.5" fill="#64748b">multipart/form-data, HMAC-signed</text>
 
   <!-- Cloudflare Tunnel edge box -->
   <rect x="530" y="416" width="260" height="90" rx="10" fill="#fff7ed" stroke="#f38020" stroke-width="1.5"/>
   <text x="660" y="440" text-anchor="middle" font-size="13.5" font-weight="700" fill="#c2410c">Cloudflare Edge</text>
-  <text x="660" y="458" text-anchor="middle" font-size="11" fill="#334155">resolves notify.keywind.cc</text>
+  <text x="660" y="458" text-anchor="middle" font-size="11" fill="#334155">resolves notify.example.com</text>
   <text x="660" y="474" text-anchor="middle" font-size="11" fill="#334155">routes into the Tunnel connection</text>
 
   <!-- connect notify box down to edge box -->
@@ -206,15 +206,15 @@
   <div class="legend-card">
     <h3>Outbound leg (sending the file)</h3>
     <ol>
-      <li>Sender emails an attachment to an address at <span class="mono">mill.keywind.cc</span>.</li>
+      <li>Sender emails an attachment to an address at <span class="mono">mill.example.com</span>.</li>
       <li>Cloudflare DNS resolves that domain's MX records to Mailgun, which receives the mail via SMTP.</li>
-      <li>Mailgun's Route matches the recipient and fires <span class="mono">store()</span> + <span class="mono">notify()</span>, POSTing the fully parsed message (multipart/form-data, HMAC-signed) to <span class="mono">https://notify.keywind.cc/mailgun-webhook</span>.</li>
+      <li>Mailgun's Route matches the recipient and fires <span class="mono">store()</span> + <span class="mono">notify()</span>, POSTing the fully parsed message (multipart/form-data, HMAC-signed) to <span class="mono">https://notify.example.com/mailgun-webhook</span>.</li>
     </ol>
   </div>
   <div class="legend-card">
     <h3>Delivery to the laptop</h3>
     <ol start="3">
-      <li>Cloudflare's edge resolves <span class="mono">notify.keywind.cc</span> and routes the request through the Cloudflare Tunnel — a persistent outbound connection <span class="mono">cloudflared</span> maintains from the laptop, so no inbound ports are ever opened.</li>
+      <li>Cloudflare's edge resolves <span class="mono">notify.example.com</span> and routes the request through the Cloudflare Tunnel — a persistent outbound connection <span class="mono">cloudflared</span> maintains from the laptop, so no inbound ports are ever opened.</li>
       <li>The tunnel forwards the request to FileMill's local HTTP server on <span class="mono">localhost:8080</span>, which verifies the signature, parses the payload, and submits a job into FileMill's existing pipeline.</li>
     </ol>
   </div>
@@ -238,7 +238,7 @@
 <div class="roles">
   <div class="role-card cf">
     <h3>Cloudflare's two roles here</h3>
-    DNS host for the <span class="mono">keywind.cc</span> zone (holds Mailgun's MX/SPF/DKIM/DMARC records for mill.keywind.cc, and the CNAME for notify.keywind.cc) — and separately, the Tunnel relay that exposes the laptop's local port publicly.
+    DNS host for the <span class="mono">example.com</span> zone (holds Mailgun's MX/SPF/DKIM/DMARC records for mill.example.com, and the CNAME for notify.example.com) — and separately, the Tunnel relay that exposes the laptop's local port publicly.
   </div>
   <div class="role-card mg">
     <h3>Mailgun's two roles here</h3>

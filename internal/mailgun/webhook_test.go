@@ -29,7 +29,7 @@ func signedFields(key string) (timestamp, token, signature string) {
 }
 
 func TestWebhookSilentlyDropsMessageWithoutAttachments(t *testing.T) {
-	s := &Service{signKey: "key", maxBytes: 1024, routes: map[string]string{"workerlist@mill.keywind.cc": "workerlist"}, allowed: map[string]bool{}, log: discardLogger()}
+	s := &Service{signKey: "key", maxBytes: 1024, routes: map[string]string{"workerlist@mill.example.com": "workerlist"}, allowed: map[string]bool{}, log: discardLogger()}
 	ts, token, sig := signedFields(s.signKey)
 	r := httptest.NewRequest(http.MethodPost, "/mailgun-webhook", bytes.NewBufferString("timestamp="+ts+"&token="+token+"&signature="+sig))
 	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
@@ -41,9 +41,9 @@ func TestWebhookSilentlyDropsMessageWithoutAttachments(t *testing.T) {
 }
 
 func TestWebhookSilentlyDropsUnknownRecipient(t *testing.T) {
-	s := &Service{signKey: "key", maxBytes: 1024, routes: map[string]string{"workerlist@mill.keywind.cc": "workerlist"}, allowed: map[string]bool{}, log: discardLogger()}
+	s := &Service{signKey: "key", maxBytes: 1024, routes: map[string]string{"workerlist@mill.example.com": "workerlist"}, allowed: map[string]bool{}, log: discardLogger()}
 	r := signedMultipart(t, s.signKey,
-		map[string]string{"recipient": "unknown@mill.keywind.cc"},
+		map[string]string{"recipient": "unknown@mill.example.com"},
 		map[string][]byte{"attachment-1": []byte("pdf")})
 	w := httptest.NewRecorder()
 	s.handle(w, r)
@@ -64,9 +64,9 @@ func TestWebhookRejectsForgedRequest(t *testing.T) {
 }
 
 func TestWebhookRejectsOversizeAttachment(t *testing.T) {
-	s := &Service{engine: newFakeEngine(), signKey: "key", maxBytes: 2, routes: map[string]string{"workerlist@mill.keywind.cc": "workerlist"}, allowed: map[string]bool{}, log: discardLogger()}
+	s := &Service{engine: newFakeEngine(), signKey: "key", maxBytes: 2, routes: map[string]string{"workerlist@mill.example.com": "workerlist"}, allowed: map[string]bool{}, log: discardLogger()}
 	r := signedMultipart(t, s.signKey,
-		map[string]string{"recipient": "workerlist@mill.keywind.cc"},
+		map[string]string{"recipient": "workerlist@mill.example.com"},
 		map[string][]byte{"attachment-1": []byte("too large")})
 	w := httptest.NewRecorder()
 	s.handle(w, r)
@@ -83,9 +83,9 @@ func TestWebhookAcceptsAndDropsRejectedAttachment(t *testing.T) {
 	engine := newFakeEngine()
 	engine.submitErr = fmt.Errorf(`workerlist does not accept ".html": %w`, app.ErrRejected)
 	logger, buf := captureLogger()
-	s := &Service{engine: engine, signKey: "key", maxBytes: 1024, routes: map[string]string{"workerlist@mill.keywind.cc": "workerlist"}, allowed: map[string]bool{}, log: logger}
+	s := &Service{engine: engine, signKey: "key", maxBytes: 1024, routes: map[string]string{"workerlist@mill.example.com": "workerlist"}, allowed: map[string]bool{}, log: logger}
 	r := signedMultipart(t, s.signKey,
-		map[string]string{"recipient": "workerlist@mill.keywind.cc", "sender": "sender@example.com"},
+		map[string]string{"recipient": "workerlist@mill.example.com", "sender": "sender@example.com"},
 		map[string][]byte{"attachment-1": []byte("<html>")})
 	w := httptest.NewRecorder()
 	s.handle(w, r)
@@ -104,9 +104,9 @@ func TestWebhookRetriesGenuineIntakeFailure(t *testing.T) {
 	engine := newFakeEngine()
 	engine.submitErr = fmt.Errorf("disk full")
 	logger, buf := captureLogger()
-	s := &Service{engine: engine, signKey: "key", maxBytes: 1024, routes: map[string]string{"workerlist@mill.keywind.cc": "workerlist"}, allowed: map[string]bool{}, log: logger}
+	s := &Service{engine: engine, signKey: "key", maxBytes: 1024, routes: map[string]string{"workerlist@mill.example.com": "workerlist"}, allowed: map[string]bool{}, log: logger}
 	r := signedMultipart(t, s.signKey,
-		map[string]string{"recipient": "workerlist@mill.keywind.cc", "sender": "sender@example.com"},
+		map[string]string{"recipient": "workerlist@mill.example.com", "sender": "sender@example.com"},
 		map[string][]byte{"attachment-1": []byte("pdf")})
 	w := httptest.NewRecorder()
 	s.handle(w, r)
@@ -124,9 +124,9 @@ func TestWebhookRetriesGenuineIntakeFailure(t *testing.T) {
 func TestWebhookLogsSenderOnAccept(t *testing.T) {
 	engine := newFakeEngine()
 	logger, buf := captureLogger()
-	s := &Service{engine: engine, signKey: "key", maxBytes: 1024, routes: map[string]string{"workerlist@mill.keywind.cc": "workerlist"}, allowed: map[string]bool{}, log: logger}
+	s := &Service{engine: engine, signKey: "key", maxBytes: 1024, routes: map[string]string{"workerlist@mill.example.com": "workerlist"}, allowed: map[string]bool{}, log: logger}
 	r := signedMultipart(t, s.signKey,
-		map[string]string{"recipient": "workerlist@mill.keywind.cc", "sender": "sender@example.com"},
+		map[string]string{"recipient": "workerlist@mill.example.com", "sender": "sender@example.com"},
 		map[string][]byte{"attachment-1": []byte("pdf")})
 	w := httptest.NewRecorder()
 	s.handle(w, r)
@@ -146,10 +146,10 @@ func TestWebhookLogsSenderOnAccept(t *testing.T) {
 func TestWebhookWarnsWhenAttachmentsAreDeclaredButNotPosted(t *testing.T) {
 	logger, buf := captureLogger()
 	s := &Service{engine: newFakeEngine(), signKey: "key", maxBytes: 1024,
-		routes: map[string]string{"workerlist@mill.keywind.cc": "workerlist"}, allowed: map[string]bool{}, log: logger}
+		routes: map[string]string{"workerlist@mill.example.com": "workerlist"}, allowed: map[string]bool{}, log: logger}
 	ts, token, sig := signedFields(s.signKey)
 	body := "timestamp=" + ts + "&token=" + token + "&signature=" + sig +
-		"&recipient=workerlist%40mill.keywind.cc&sender=someone%40example.com&attachment-count=2"
+		"&recipient=workerlist%40mill.example.com&sender=someone%40example.com&attachment-count=2"
 	r := httptest.NewRequest(http.MethodPost, "/mailgun-webhook", strings.NewReader(body))
 	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	w := httptest.NewRecorder()
@@ -162,7 +162,7 @@ func TestWebhookWarnsWhenAttachmentsAreDeclaredButNotPosted(t *testing.T) {
 	if !strings.Contains(out, "store(notify") {
 		t.Errorf("the warning must name the likely cause; got %q", out)
 	}
-	if !strings.Contains(out, "workerlist@mill.keywind.cc") || !strings.Contains(out, "someone@example.com") {
+	if !strings.Contains(out, "workerlist@mill.example.com") || !strings.Contains(out, "someone@example.com") {
 		t.Errorf("the warning must name the recipient and sender; got %q", out)
 	}
 }
@@ -172,11 +172,11 @@ func TestWebhookWarnsWhenAttachmentsAreDeclaredButNotPosted(t *testing.T) {
 func TestWebhookWarnsOnStoredAttachmentsJSON(t *testing.T) {
 	logger, buf := captureLogger()
 	s := &Service{engine: newFakeEngine(), signKey: "key", maxBytes: 1024,
-		routes: map[string]string{"workerlist@mill.keywind.cc": "workerlist"}, allowed: map[string]bool{}, log: logger}
+		routes: map[string]string{"workerlist@mill.example.com": "workerlist"}, allowed: map[string]bool{}, log: logger}
 	ts, token, sig := signedFields(s.signKey)
 	attachments := url.QueryEscape(`[{"url":"https://storage.mailgun.net/v3/domains/x/messages/y/attachments/0","name":"schedule.pdf"}]`)
 	body := "timestamp=" + ts + "&token=" + token + "&signature=" + sig +
-		"&recipient=workerlist%40mill.keywind.cc&sender=someone%40example.com&attachments=" + attachments
+		"&recipient=workerlist%40mill.example.com&sender=someone%40example.com&attachments=" + attachments
 	r := httptest.NewRequest(http.MethodPost, "/mailgun-webhook", strings.NewReader(body))
 	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	w := httptest.NewRecorder()
@@ -193,10 +193,10 @@ func TestWebhookWarnsOnStoredAttachmentsJSON(t *testing.T) {
 func TestWebhookRecordsPlainEmptyMessageWithoutWarning(t *testing.T) {
 	logger, buf := captureLogger()
 	s := &Service{engine: newFakeEngine(), signKey: "key", maxBytes: 1024,
-		routes: map[string]string{"excel@mill.keywind.cc": "workerlist"}, allowed: map[string]bool{}, log: logger}
+		routes: map[string]string{"excel@mill.example.com": "workerlist"}, allowed: map[string]bool{}, log: logger}
 	ts, token, sig := signedFields(s.signKey)
 	body := "timestamp=" + ts + "&token=" + token + "&signature=" + sig +
-		"&recipient=excel%40mill.keywind.cc&sender=someone%40example.com"
+		"&recipient=excel%40mill.example.com&sender=someone%40example.com"
 	r := httptest.NewRequest(http.MethodPost, "/mailgun-webhook", strings.NewReader(body))
 	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	w := httptest.NewRecorder()
@@ -206,7 +206,7 @@ func TestWebhookRecordsPlainEmptyMessageWithoutWarning(t *testing.T) {
 	if strings.Contains(out, "store(notify") {
 		t.Errorf("an ordinary empty message must not raise the route warning; got %q", out)
 	}
-	if !strings.Contains(out, "excel@mill.keywind.cc") {
+	if !strings.Contains(out, "excel@mill.example.com") {
 		t.Errorf("the outcome must name the recipient so a test can be confirmed; got %q", out)
 	}
 }
@@ -219,7 +219,7 @@ func pdfRouteService(engine *fakeEngine, logger *log.Logger) *Service {
 		engine:   engine,
 		signKey:  "key",
 		maxBytes: 1024,
-		routes:   map[string]string{"workerlist@mill.keywind.cc": "workerlist"},
+		routes:   map[string]string{"workerlist@mill.example.com": "workerlist"},
 		allowed:  map[string]bool{},
 		log:      logger,
 	}
@@ -233,7 +233,7 @@ func TestWebhookIgnoresEmailWithTwoAcceptableAttachments(t *testing.T) {
 	logger, buf := captureLogger()
 	s := pdfRouteService(engine, logger)
 	r := signedMultipart(t, s.signKey,
-		map[string]string{"recipient": "workerlist@mill.keywind.cc", "sender": "sender@example.com"},
+		map[string]string{"recipient": "workerlist@mill.example.com", "sender": "sender@example.com"},
 		map[string][]byte{"attachment-1": []byte("pdf one"), "attachment-2": []byte("pdf two")},
 		map[string]string{"attachment-1": "first.pdf", "attachment-2": "second.pdf"})
 	w := httptest.NewRecorder()
@@ -248,7 +248,7 @@ func TestWebhookIgnoresEmailWithTwoAcceptableAttachments(t *testing.T) {
 	if !strings.Contains(buf.String(), "sender@example.com") {
 		t.Errorf("the drop must name the sender; got %q", buf.String())
 	}
-	if !strings.Contains(buf.String(), "workerlist@mill.keywind.cc") {
+	if !strings.Contains(buf.String(), "workerlist@mill.example.com") {
 		t.Errorf("the drop must name the recipient; got %q", buf.String())
 	}
 }
@@ -260,7 +260,7 @@ func TestWebhookIgnoresUnprocessableAttachmentsWhenCounting(t *testing.T) {
 	engine := newFakeEngine()
 	s := pdfRouteService(engine, discardLogger())
 	r := signedMultipart(t, s.signKey,
-		map[string]string{"recipient": "workerlist@mill.keywind.cc", "sender": "sender@example.com"},
+		map[string]string{"recipient": "workerlist@mill.example.com", "sender": "sender@example.com"},
 		map[string][]byte{"attachment-1": []byte("logo bytes"), "attachment-2": []byte("pdf")},
 		map[string]string{"attachment-1": "signature-logo.png", "attachment-2": "schedule.pdf"})
 	w := httptest.NewRecorder()
@@ -284,7 +284,7 @@ func TestWebhookDropsEmailWithNoAcceptableAttachment(t *testing.T) {
 	logger, buf := captureLogger()
 	s := pdfRouteService(engine, logger)
 	r := signedMultipart(t, s.signKey,
-		map[string]string{"recipient": "workerlist@mill.keywind.cc", "sender": "sender@example.com"},
+		map[string]string{"recipient": "workerlist@mill.example.com", "sender": "sender@example.com"},
 		map[string][]byte{"attachment-1": []byte("logo bytes")},
 		map[string]string{"attachment-1": "signature-logo.png"})
 	w := httptest.NewRecorder()
@@ -298,7 +298,7 @@ func TestWebhookDropsEmailWithNoAcceptableAttachment(t *testing.T) {
 	}
 	// Two addresses can share one operation, so the operation alone does not
 	// identify where the mail was sent.
-	if !strings.Contains(buf.String(), "workerlist@mill.keywind.cc") {
+	if !strings.Contains(buf.String(), "workerlist@mill.example.com") {
 		t.Errorf("the drop must name the recipient, not just the operation; got %q", buf.String())
 	}
 }

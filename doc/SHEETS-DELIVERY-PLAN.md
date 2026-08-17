@@ -54,7 +54,7 @@ round trip.
    so a published app avoids verification. Never use full `drive` (restricted →
    security assessment). App configured External + published to production for a
    long-lived refresh token. See "OAuth setup" below.
-3. **Scope:** `iwk@mill.keywind.cc` gets this mode. It changes from
+3. **Scope:** `iwk@mill.example.com` gets this mode. It changes from
    attachment-Sheets to link-Sheets. `workerlist@` stays attachment-Sheets.
 4. **Retention:** delete uploaded Drive files after 30 days.
 5. **Senders:** `allowed_senders` stays open (`[]`). Anyone emails their own
@@ -82,7 +82,7 @@ flat map, address → delivery mode. Absent/`email` = today's attachment reply;
 
 ```yaml
 delivery:
-  iwk@mill.keywind.cc: sheets-link
+  iwk@mill.example.com: sheets-link
 ```
 
 Return mode is a *route* concern, not a transformer property — this is the
