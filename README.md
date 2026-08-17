@@ -3,6 +3,7 @@
 </p>
 
 <p align="center">
+  <a href="https://github.com/brocla/FileMill/actions/workflows/ci.yml"><img src="https://github.com/brocla/FileMill/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
   <a href="https://github.com/brocla/FileMill/releases"><img src="https://img.shields.io/github/v/tag/brocla/FileMill?label=release" alt="Release"></a>
   <a href="LICENSE"><img src="https://img.shields.io/github/license/brocla/FileMill" alt="License"></a>
   <img src="https://img.shields.io/github/go-mod/go-version/brocla/FileMill" alt="Go version">
