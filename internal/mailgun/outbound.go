@@ -86,10 +86,16 @@ func finished(sub store.EmailSubmission) bool {
 func (s *Service) deliver(ctx context.Context, sub store.EmailSubmission) error {
 	var lines []string
 	var outputs []app.OutputFile
+	var labels []string
 	for _, item := range sub.Jobs {
-		lines = append(lines, fmt.Sprintf("%s: %s", item.Job.InputName, item.Job.Message))
+		label := s.engine.OperationLabel(item.Job.Operation)
+		lines = append(lines, fmt.Sprintf("%s (%s): %s",
+			item.Job.InputName, label, item.Job.Message))
 		if item.Job.Status != store.StatusSucceeded {
 			continue
+		}
+		if label != "" {
+			labels = appendDistinct(labels, label)
 		}
 		files, err := s.engine.Outputs(item.Job.ID)
 		if err != nil {
@@ -107,7 +113,7 @@ func (s *Service) deliver(ctx context.Context, sub store.EmailSubmission) error 
 		if err != nil {
 			return err
 		}
-		text = withLinks(text, links)
+		text = withLinks(text, links, labels)
 	} else {
 		for _, f := range outputs {
 			attachments = append(attachments, f.Path)
@@ -173,14 +179,51 @@ func (s *Service) publish(ctx context.Context, submissionID int64, outputs []app
 	return links, nil
 }
 
+// appendDistinct adds value to values unless it is already there, preserving
+// order. The lists are a handful of labels at most, so a linear scan beats
+// carrying a set alongside them.
+func appendDistinct(values []string, value string) []string {
+	for _, existing := range values {
+		if existing == value {
+			return values
+		}
+	}
+	return append(values, value)
+}
+
 // withLinks appends the published spreadsheet links to a reply body.
-func withLinks(text string, links []string) string {
+//
+// `labels` names the reports that succeeded. When they are all the same one --
+// the ordinary case, since a submission is routed to a single operation -- the
+// reply names it, so a reader who asked for two different reports over the same
+// file can tell which reply is which. A mixed submission falls back to the
+// generic wording rather than picking one of them to name.
+func withLinks(text string, links, labels []string) string {
 	if len(links) == 0 {
 		return text
 	}
+	// "spreadsheet" unless every succeeded job produced the same report, in
+	// which case that report's own name is more use to the reader.
+	what := "spreadsheet"
+	if len(labels) == 1 {
+		what = labels[0]
+	}
+	sentence := fmt.Sprintf(
+		"Your %s is ready. Anyone with the link can view and edit it:", what)
+	if len(links) > 1 {
+		// A label is a report's name, not a countable noun, so it is pluralized
+		// by what it names rather than by an "s" -- "your X files", not "your Xs".
+		plural := "spreadsheets"
+		if len(labels) == 1 {
+			plural = what + " files"
+		}
+		sentence = fmt.Sprintf(
+			"Your %s are ready. Anyone with the link can view and edit them:", plural)
+	}
+
 	var b strings.Builder
 	b.WriteString(text)
-	b.WriteString("\n\nYour spreadsheet is ready. Anyone with the link can view and edit it:\n")
+	fmt.Fprintf(&b, "\n\n%s\n", sentence)
 	for _, link := range links {
 		b.WriteString("\n")
 		b.WriteString(link)

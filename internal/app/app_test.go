@@ -86,3 +86,61 @@ func TestSubmitThreadsTransformerOptionsIntoJob(t *testing.T) {
 		t.Errorf("no_opts: job.Options = %v, want empty", opts)
 	}
 }
+
+// OperationLabel is what lets a reply say which report it carries. Its fallback
+// matters as much as its lookup: an unlabelled transformer, or one that has
+// been removed from the config since the job ran, must still name something.
+func TestOperationLabelReadsTheConfiguredLabel(t *testing.T) {
+	root := t.TempDir()
+	writeTransformers(t, root, `transformers:
+  - operation: labelled
+    label: "IWK booth worker list"
+    command: ["python.exe", "x.py"]
+    extensions: [pdf]
+  - operation: unlabelled
+    command: ["python.exe", "x.py"]
+    extensions: [pdf]
+`)
+	app, err := Open(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer app.Close()
+
+	for _, tc := range []struct{ operation, want string }{
+		{"labelled", "IWK booth worker list"},
+		{"unlabelled", "unlabelled"}, // no label configured
+		{"gone", "gone"},             // no such operation
+	} {
+		if got := app.OperationLabel(tc.operation); got != tc.want {
+			t.Errorf("OperationLabel(%q) = %q, want %q", tc.operation, got, tc.want)
+		}
+	}
+}
+
+// Two operations may share a label: the workerlist pair are one report in two
+// layouts, and the reader cares which report they got, not which layout.
+func TestOperationLabelCanBeSharedByTwoOperations(t *testing.T) {
+	root := t.TempDir()
+	writeTransformers(t, root, `transformers:
+  - operation: report_excel
+    label: "IWK booth worker list"
+    command: ["python.exe", "x.py"]
+    options: { layout: excel }
+    extensions: [pdf]
+  - operation: report_sheets
+    label: "IWK booth worker list"
+    command: ["python.exe", "x.py"]
+    options: { layout: sheets }
+    extensions: [pdf]
+`)
+	app, err := Open(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer app.Close()
+
+	if a, b := app.OperationLabel("report_excel"), app.OperationLabel("report_sheets"); a != b {
+		t.Errorf("layouts of one report must share a label; got %q and %q", a, b)
+	}
+}

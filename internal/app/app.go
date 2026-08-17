@@ -132,6 +132,18 @@ func (a *App) OperationOptions(operation string) map[string]any {
 	}
 	return t.Options
 }
+
+// OperationLabel names the report an operation produces, for the reply that
+// carries it back. It falls back to the operation name, so a transformer that
+// configures no label still says something rather than nothing -- and an
+// operation that no longer exists still names what was asked for.
+func (a *App) OperationLabel(operation string) string {
+	t, ok := a.cfg.Find(operation)
+	if !ok || t.Label == "" {
+		return operation
+	}
+	return t.Label
+}
 func (a *App) Job(id string) (store.Job, error) { return a.store.Get(id) }
 func (a *App) Outputs(id string) ([]OutputFile, error) {
 	r, err := readResult(filepath.Join(a.data, "jobs", id, "result.json"), filepath.Join(a.data, "jobs", id))

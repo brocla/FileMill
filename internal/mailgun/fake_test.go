@@ -56,6 +56,10 @@ type fakeEngine struct {
 
 	deliveries      map[deliveryKey]store.Delivery
 	sweptDeliveries map[deliveryKey]bool
+
+	// labels maps an operation to the report name a reply calls it by. An
+	// operation absent here falls back to its own name, as the real engine does.
+	labels map[string]string
 }
 
 func newFakeEngine() *fakeEngine {
@@ -69,7 +73,15 @@ func newFakeEngine() *fakeEngine {
 		outputsErr:      map[string]error{},
 		deliveries:      map[deliveryKey]store.Delivery{},
 		sweptDeliveries: map[deliveryKey]bool{},
+		labels:          map[string]string{},
 	}
+}
+
+func (f *fakeEngine) OperationLabel(operation string) string {
+	if label := f.labels[operation]; label != "" {
+		return label
+	}
+	return operation
 }
 
 func (f *fakeEngine) Accepts(operation, filename string) bool {

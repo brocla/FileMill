@@ -13,10 +13,16 @@ type Config struct {
 	Transformers []Transformer `yaml:"transformers"`
 }
 type Transformer struct {
-	Operation  string         `yaml:"operation"`
-	Command    []string       `yaml:"command"`
-	Extensions []string       `yaml:"extensions"`
-	Options    map[string]any `yaml:"options"` // passed through into each job's job.json
+	Operation  string   `yaml:"operation"`
+	Command    []string `yaml:"command"`
+	Extensions []string `yaml:"extensions"`
+	// Label names the report this transformer produces, in words a recipient
+	// would recognize, for the reply that carries the result back. Optional:
+	// without one the operation name is used. Two operations that differ only
+	// in output layout share a label — the reader cares which report they got,
+	// not which layout produced it.
+	Label   string         `yaml:"label"`
+	Options map[string]any `yaml:"options"` // passed through into each job's job.json
 }
 
 func Load(path string) (Config, error) {
