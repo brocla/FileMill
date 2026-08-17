@@ -39,6 +39,12 @@ type Engine interface {
 	MarkEmailDelivered(id int64) error
 	Outputs(id string) ([]app.OutputFile, error)
 
+	// OperationLabel names the report an operation produces, so a reply can say
+	// which one it carries. Several operations reach the same mailbox pattern
+	// over the same source file, and the outputs differ only by a filename
+	// prefix -- without the label the reply cannot tell them apart.
+	OperationLabel(operation string) string
+
 	// Published Drive files, for the sheets-link delivery mode: recorded before
 	// the reply is sent so a retry reuses the link instead of uploading again,
 	// and swept once they pass the retention horizon.

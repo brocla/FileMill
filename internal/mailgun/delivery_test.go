@@ -136,6 +136,13 @@ func newDeliveryFixture(t *testing.T) *deliveryFixture {
 // named output files — usually one, but a job may declare several.
 func (f *deliveryFixture) addSubmission(t *testing.T, id int64, recipient string, outputNames ...string) {
 	t.Helper()
+	f.addSubmissionFor(t, id, recipient, "workerlist_sheets", outputNames...)
+}
+
+// addSubmissionFor is addSubmission with the operation named, for the tests
+// that turn on which report the reply is carrying.
+func (f *deliveryFixture) addSubmissionFor(t *testing.T, id int64, recipient, operation string, outputNames ...string) {
+	t.Helper()
 	jobID := fmt.Sprintf("job-%d", id)
 	dir := t.TempDir()
 	for _, name := range outputNames {
@@ -149,7 +156,8 @@ func (f *deliveryFixture) addSubmission(t *testing.T, id int64, recipient string
 		ID: id, Sender: fmt.Sprintf("sender%d@example.com", id), Recipient: recipient,
 		Subject: "Schedule", MessageID: fmt.Sprintf("<msg-%d@example.com>", id), Expected: 1,
 		Jobs: []store.EmailJob{{Index: 0, Job: store.Job{
-			ID: jobID, Status: store.StatusSucceeded, InputName: "schedule.pdf", Message: "ok",
+			ID: jobID, Operation: operation, Status: store.StatusSucceeded,
+			InputName: "schedule.pdf", Message: "ok",
 		}}},
 	})
 }
@@ -327,5 +335,164 @@ func TestDeliverSkipsSubmissionWhoseOutputsCannotBeRead(t *testing.T) {
 	}
 	if !f.engine.delivered[2] {
 		t.Error("the following submission must still be delivered")
+	}
+}
+
+// --- naming the report in the reply --------------------------------------
+//
+// One source PDF feeds more than one report, and the outputs differ only by a
+// filename prefix the recipient never sees under link delivery. Without the
+// report's name in the reply, an iwk answer and a vwk answer read identically.
+
+func labelledFixture(t *testing.T) *deliveryFixture {
+	t.Helper()
+	f := newDeliveryFixture(t)
+	f.engine.labels = map[string]string{
+		"workerlist_sheets": "IWK booth worker list",
+		"workerlist_excel":  "IWK booth worker list",
+		"vworker":           "VWK worker schedule",
+	}
+	return f
+}
+
+func deliverOne(t *testing.T, f *deliveryFixture) string {
+	t.Helper()
+	if err := f.service.deliverPending(context.Background()); err != nil {
+		t.Fatalf("deliverPending: %v", err)
+	}
+	if len(f.mailgun.sent) != 1 {
+		t.Fatalf("sent %d replies, want 1", len(f.mailgun.sent))
+	}
+	return f.mailgun.sent[0].text
+}
+
+func TestDeliverNamesTheWorkerlistReportInALinkReply(t *testing.T) {
+	f := labelledFixture(t)
+	f.addSubmissionFor(t, 1, "iwk@mill.test", "workerlist_sheets", "iwk_schedule.xlsx")
+
+	text := deliverOne(t, f)
+
+	if !strings.Contains(text, "Your IWK booth worker list is ready") {
+		t.Errorf("reply must name the report; got %q", text)
+	}
+	if strings.Contains(text, "VWK worker schedule") {
+		t.Errorf("reply must not name the other report; got %q", text)
+	}
+}
+
+func TestDeliverNamesTheVworkerReportInALinkReply(t *testing.T) {
+	f := labelledFixture(t)
+	f.addSubmissionFor(t, 1, "iwk@mill.test", "vworker", "vwk_schedule.xlsx")
+
+	text := deliverOne(t, f)
+
+	if !strings.Contains(text, "Your VWK worker schedule is ready") {
+		t.Errorf("reply must name the report; got %q", text)
+	}
+	if strings.Contains(text, "IWK booth worker list") {
+		t.Errorf("reply must not name the other report; got %q", text)
+	}
+}
+
+// The two workerlist operations are one report in two layouts, so they answer
+// to the same name. A recipient cares which report they got, not which layout
+// rendered it.
+func TestDeliverGivesBothWorkerlistLayoutsTheSameName(t *testing.T) {
+	for _, operation := range []string{"workerlist_sheets", "workerlist_excel"} {
+		t.Run(operation, func(t *testing.T) {
+			f := labelledFixture(t)
+			f.addSubmissionFor(t, 1, "iwk@mill.test", operation, "iwk_schedule.xlsx")
+
+			if text := deliverOne(t, f); !strings.Contains(text, "IWK booth worker list") {
+				t.Errorf("reply must name the report; got %q", text)
+			}
+		})
+	}
+}
+
+// Every job line names its report, not just the link sentence: one submission
+// can carry several jobs, and only a per-line label tells them apart.
+func TestDeliverNamesTheReportOnEachJobLine(t *testing.T) {
+	f := labelledFixture(t)
+	f.addSubmissionFor(t, 1, "iwk@mill.test", "vworker", "vwk_schedule.xlsx")
+
+	if text := deliverOne(t, f); !strings.Contains(text, "schedule.pdf (VWK worker schedule): ok") {
+		t.Errorf("job line must name the report; got %q", text)
+	}
+}
+
+// An attachment reply gets the same treatment: it is the job lines that carry
+// the name there, since there is no link sentence to hang it on.
+func TestDeliverNamesTheReportInAnAttachmentReply(t *testing.T) {
+	f := labelledFixture(t)
+	f.addSubmissionFor(t, 1, "excel@mill.test", "workerlist_excel", "iwk_schedule.xlsx")
+
+	text := deliverOne(t, f)
+
+	if len(f.mailgun.sent[0].attachments) != 1 {
+		t.Fatalf("an email route must attach the file; got %v", f.mailgun.sent[0].attachments)
+	}
+	if !strings.Contains(text, "(IWK booth worker list)") {
+		t.Errorf("job line must name the report; got %q", text)
+	}
+}
+
+// A transformer that configures no label still says something: the operation
+// name is a worse name than a real one, but far better than a blank.
+func TestDeliverFallsBackToTheOperationNameWhenUnlabelled(t *testing.T) {
+	f := labelledFixture(t)
+	f.addSubmissionFor(t, 1, "iwk@mill.test", "copy_rename", "iwk_schedule.xlsx")
+
+	if text := deliverOne(t, f); !strings.Contains(text, "Your copy_rename is ready") {
+		t.Errorf("reply must fall back to the operation name; got %q", text)
+	}
+}
+
+// Several files, one report: the sentence pluralizes by what the label names
+// rather than by bolting an "s" onto a report's name.
+func TestDeliverPluralizesWhenOneReportProducedSeveralFiles(t *testing.T) {
+	f := labelledFixture(t)
+	f.addSubmissionFor(t, 1, "iwk@mill.test", "vworker", "vwk_one.xlsx", "vwk_two.xlsx")
+
+	text := deliverOne(t, f)
+
+	if !strings.Contains(text, "Your VWK worker schedule files are ready") {
+		t.Errorf("reply must pluralize around the label; got %q", text)
+	}
+	if !strings.Contains(text, "view and edit them:") {
+		t.Errorf("reply must agree in number; got %q", text)
+	}
+}
+
+// A submission whose jobs produced different reports has no single name to
+// give, so it says nothing rather than naming one of them and misleading.
+func TestDeliverUsesGenericWordingForAMixedSubmission(t *testing.T) {
+	f := labelledFixture(t)
+	f.addSubmissionFor(t, 1, "iwk@mill.test", "vworker", "vwk_schedule.xlsx")
+
+	// A second job on the same submission, from the other transformer.
+	dir := t.TempDir()
+	path := filepath.Join(dir, "iwk_schedule.xlsx")
+	if err := os.WriteFile(path, []byte("spreadsheet bytes"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	f.engine.outputs["job-1b"] = []app.OutputFile{{Name: "iwk_schedule.xlsx", Path: path}}
+	f.engine.pending[0].Jobs = append(f.engine.pending[0].Jobs, store.EmailJob{
+		Index: 1, Job: store.Job{
+			ID: "job-1b", Operation: "workerlist_sheets", Status: store.StatusSucceeded,
+			InputName: "roster.pdf", Message: "ok",
+		},
+	})
+
+	text := deliverOne(t, f)
+
+	if !strings.Contains(text, "Your spreadsheets are ready") {
+		t.Errorf("a mixed submission must not name one report; got %q", text)
+	}
+	// Both are still named on their own job lines.
+	for _, want := range []string{"(VWK worker schedule)", "(IWK booth worker list)"} {
+		if !strings.Contains(text, want) {
+			t.Errorf("job lines must name each report; %q missing from %q", want, text)
+		}
 	}
 }
