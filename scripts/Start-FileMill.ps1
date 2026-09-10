@@ -9,7 +9,7 @@ $repositoryRoot = Split-Path -Parent $PSScriptRoot
 $executable = Join-Path $repositoryRoot 'bin\filemill.exe'
 
 if (-not (Test-Path -LiteralPath $executable -PathType Leaf)) {
-    throw "FileMill executable not found at $executable. Build it with: go build -o bin/filemill.exe ./cmd/filemill"
+    throw "FileMill executable not found at $executable. Build it with: .\scripts\Build-FileMill.ps1"
 }
 
 if ($Foreground) {

@@ -17,9 +17,13 @@ import (
 	"filemill/internal/mailgun"
 )
 
-// version is the FileMill build version. Overridable at build time with
-// -ldflags "-X main.version=$(git describe --tags)"; defaults to the tagged release.
-var version = "0.1.1"
+// version is the FileMill build version, stamped at build time by
+// scripts/Build-FileMill.ps1 via -ldflags "-X main.version=$(git describe)".
+// A binary built directly with `go build`, bypassing that script, keeps this
+// default — so an unstamped build is obviously identifiable rather than
+// silently claiming a specific version number that only goes stale, the way
+// a hand-maintained default here already has once.
+var version = "dev"
 
 func main() {
 	if len(os.Args) >= 2 && (os.Args[1] == "--version" || os.Args[1] == "-v" || os.Args[1] == "version") {
