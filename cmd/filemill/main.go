@@ -117,6 +117,10 @@ func main() {
 			} else {
 				mailLog.Print("integration disabled: no Mailgun environment variables set")
 			}
+			// Job workspaces accumulate whether or not email is configured, so
+			// this sweep runs unconditionally in continuous mode rather than
+			// nested under the mailgun branch above.
+			go application.SweepExpiredJobs(ctx)
 		}
 		runErr := application.Run(ctx, once)
 		if server != nil {
