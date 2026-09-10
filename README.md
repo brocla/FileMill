@@ -50,10 +50,16 @@ an isolated workspace, then sends the result back over the same channel.
 ```powershell
 git clone https://github.com/brocla/FileMill.git
 cd FileMill
-go build -o bin/filemill.exe ./cmd/filemill
+.\scripts\Build-FileMill.ps1
 go build -o bin/copy-rename.exe ./examples/transformers/copy-rename
 go build -o bin/uppercase.exe ./examples/transformers/uppercase
 ```
+
+`Build-FileMill.ps1` stamps the binary with `git describe --tags --dirty
+--always`, so `filemill --version` and the webhook startup line always name
+the exact commit that was built — not a hand-maintained string that quietly
+goes stale. The example transformers don't carry a version, so they build
+directly with `go build`.
 
 `copy-rename` and `uppercase` are two minimal example transformers included
 in the repo — see [Writing a transformer](#writing-a-transformer) below.
@@ -240,7 +246,7 @@ Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" |
   Where-Object { $_.CommandLine -match 'Supervise-FileMill' } |
   ForEach-Object { Stop-Process -Id $_.ProcessId -Force }
 Get-Process filemill -ErrorAction SilentlyContinue | Stop-Process -Force
-go build -o bin\filemill.exe ./cmd/filemill
+.\scripts\Build-FileMill.ps1
 Start-ScheduledTask -TaskName 'FileMill Worker'
 ```
 
@@ -277,8 +283,8 @@ against a migrated database is not a rollback: it runs constraints the
 schema no longer enforces, which is how duplicate rows get written rather
 than rejected.
 
-Then `go build` overwrites the binary and `Start-ScheduledTask` launches a
-fresh supervised chain on the new code. Confirm it came up the same way
+Then `Build-FileMill.ps1` overwrites the binary and `Start-ScheduledTask`
+launches a fresh supervised chain on the new code. Confirm it came up the same way
 described in [Logs](#logs) above. Because a fresh start also re-reads the
 YAML, this one sequence covers any change that touches code, with or without
 config.
