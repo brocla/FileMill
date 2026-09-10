@@ -16,6 +16,14 @@ func (s *Store) backdateDelivery(submissionID int64, outputIndex int, when time.
 	return err
 }
 
+// backdateJobCompletion ages a job's completed_at so a job-sweep test doesn't
+// have to wait 30 days. Test-only, hence its home here rather than in the
+// store's API.
+func (s *Store) backdateJobCompletion(id string, when time.Time) error {
+	_, err := s.db.Exec("UPDATE jobs SET completed_at=? WHERE id=?", when.UTC().Format(time.RFC3339Nano), id)
+	return err
+}
+
 // A published Drive file is recorded before the reply is sent, so a retry after
 // a failed send finds the record and reuses the link instead of uploading a
 // second copy. The record is keyed per output file, because one job may declare
@@ -88,6 +96,85 @@ func TestExpiredDeliveriesRespectCutoffAndDeletion(t *testing.T) {
 	}
 	if len(again) != 0 {
 		t.Fatalf("a deleted record must not be offered again; got %+v", again)
+	}
+}
+
+// The job sweep's whole query lives here: a completed job past the cutoff is
+// offered once, and never again once marked.
+func TestExpiredJobsRespectCutoffAndDeletion(t *testing.T) {
+	s, err := Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	now := time.Now().UTC()
+	if err := s.Create(Job{ID: "old-job", Operation: "copy_rename", InputName: "a.txt", CreatedAt: now}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Complete("old-job", StatusSucceeded, "ok"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.backdateJobCompletion("old-job", now.Add(-31*24*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Create(Job{ID: "new-job", Operation: "copy_rename", InputName: "b.txt", CreatedAt: now}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Complete("new-job", StatusSucceeded, "ok"); err != nil {
+		t.Fatal(err)
+	}
+
+	cutoff := now.Add(-30 * 24 * time.Hour)
+	expired, err := s.ExpiredJobs(cutoff)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(expired) != 1 || expired[0] != "old-job" {
+		t.Fatalf("expired = %v, want only old-job", expired)
+	}
+
+	if err := s.MarkJobFilesDeleted("old-job"); err != nil {
+		t.Fatal(err)
+	}
+	again, err := s.ExpiredJobs(cutoff)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(again) != 0 {
+		t.Fatalf("a swept job must not be offered again; got %v", again)
+	}
+
+	// The row itself must survive being swept — only files_deleted_at changes.
+	got, err := s.Get("old-job")
+	if err != nil {
+		t.Fatalf("Get after sweep: %v", err)
+	}
+	if got.Status != StatusSucceeded {
+		t.Errorf("swept job status = %q, want %q", got.Status, StatusSucceeded)
+	}
+}
+
+// A job that is still queued or running must never be swept, however old its
+// created_at is — completed_at is the only clock the sweep reads.
+func TestExpiredJobsExcludesQueuedAndRunning(t *testing.T) {
+	s, err := Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	ancient := time.Now().UTC().Add(-365 * 24 * time.Hour)
+	if err := s.Create(Job{ID: "stuck-job", Operation: "copy_rename", InputName: "a.txt", CreatedAt: ancient}); err != nil {
+		t.Fatal(err)
+	}
+
+	expired, err := s.ExpiredJobs(time.Now().UTC().Add(-30 * 24 * time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(expired) != 0 {
+		t.Fatalf("a job with no completed_at must never be offered; got %v", expired)
 	}
 }
 

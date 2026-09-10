@@ -71,9 +71,18 @@ func Open(path string) (*Store, error) {
 	s := &Store{db: db}
 	_, err = db.Exec(`CREATE TABLE IF NOT EXISTS jobs (
  id TEXT PRIMARY KEY, operation TEXT NOT NULL, status TEXT NOT NULL, input_name TEXT NOT NULL,
- message TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, started_at TEXT, completed_at TEXT
+ message TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, started_at TEXT, completed_at TEXT,
+ files_deleted_at TEXT
 ); CREATE INDEX IF NOT EXISTS jobs_status_created ON jobs(status, created_at);`)
 	if err != nil {
+		db.Close()
+		return nil, err
+	}
+	if err := migrateJobFilesDeletedColumn(db); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("migrate jobs: %w", err)
+	}
+	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS jobs_sweep ON jobs(files_deleted_at, completed_at)`); err != nil {
 		db.Close()
 		return nil, err
 	}
@@ -171,6 +180,39 @@ func migrateSubmissionKey(db *sql.DB) error {
 		}
 	}
 	return tx.Commit()
+}
+
+// migrateJobFilesDeletedColumn adds files_deleted_at to jobs on a database
+// created before the age-based job sweep existed. It is a no-op once the
+// column exists, so it costs one PRAGMA per start on every database after
+// the first — the same trade the CREATE TABLE IF NOT EXISTS statements above
+// already make.
+//
+// A plain ALTER TABLE ADD COLUMN suffices here, unlike migrateSubmissionKey's
+// rebuild: SQLite can add a nullable column in place, it just can't drop or
+// widen a constraint that way.
+func migrateJobFilesDeletedColumn(db *sql.DB) error {
+	rows, err := db.Query(`PRAGMA table_info(jobs)`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var cid, notnull, pk int
+		var name, ctype string
+		var dflt sql.NullString
+		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); err != nil {
+			return err
+		}
+		if name == "files_deleted_at" {
+			return nil
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	_, err = db.Exec(`ALTER TABLE jobs ADD COLUMN files_deleted_at TEXT`)
+	return err
 }
 
 // uniqueIndexColumns returns one column list per unique index on a table,
@@ -398,6 +440,37 @@ func (s *Store) Complete(id, status, message string) error {
 	_, err := s.db.Exec("UPDATE jobs SET status=?, message=?, completed_at=? WHERE id=?", status, message, time.Now().UTC().Format(time.RFC3339Nano), id)
 	return err
 }
+// ExpiredJobs returns ids of jobs that finished before cutoff and whose
+// workspace the job sweep has not yet deleted from data/jobs. Only
+// completed_at is checked, not created_at, so a job still queued or running
+// is never a candidate no matter how old it is.
+func (s *Store) ExpiredJobs(cutoff time.Time) ([]string, error) {
+	rows, err := s.db.Query("SELECT id FROM jobs WHERE files_deleted_at IS NULL AND completed_at IS NOT NULL AND completed_at<? ORDER BY completed_at",
+		cutoff.UTC().Format(time.RFC3339Nano))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
+}
+
+// MarkJobFilesDeleted records that the sweep removed a job's workspace from
+// disk. The job row itself is kept, so Get still answers after the files are
+// gone — only this one column changes.
+func (s *Store) MarkJobFilesDeleted(id string) error {
+	_, err := s.db.Exec("UPDATE jobs SET files_deleted_at=? WHERE id=?",
+		time.Now().UTC().Format(time.RFC3339Nano), id)
+	return err
+}
+
 func (s *Store) Get(id string) (Job, error) {
 	var j Job
 	var c string
