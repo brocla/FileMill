@@ -217,6 +217,18 @@ func (a *App) RecordAlertSuppressed(category string) error {
 	return a.store.RecordAlertSuppressed(category)
 }
 func (a *App) AlertSendsSince(t time.Time) ([]time.Time, error) { return a.store.AlertSendsSince(t) }
+
+// InterruptLeftoverJobs marks the jobs a dead predecessor left running as
+// interrupted and returns how many, for the restart alert. run calls it once,
+// just before the job loop starts; nothing else may (see
+// store.InterruptRunning).
+func (a *App) InterruptLeftoverJobs() (int, error) {
+	n, err := a.store.InterruptRunning()
+	if n > 0 {
+		a.log.Printf("worker startup: marked %d job(s) left running by the previous worker as interrupted", n)
+	}
+	return n, err
+}
 func (a *App) Run(ctx context.Context, once bool) error {
 	a.log.Printf("worker started once=%t", once)
 	var claims claimFailures

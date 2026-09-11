@@ -153,8 +153,10 @@ in**, and again at logon as a backstop. It launches a **supervisor**
 (`Supervise-FileMill.ps1`) that runs `filemill run` and **restarts it
 automatically if it crashes** — an immediate first retry, then escalating
 backoff (5s, 15s, 30s, 60s, 120s) for repeated rapid failures; a persistent
-crash-loop is logged (alerting is tracked in issue #7). A clean exit (Ctrl+C
-/ shutdown) stops the supervisor.
+crash-loop is logged. When operator alerts are on (`alert_recipient`), the
+restarted worker emails one `restart` alert saying how its predecessor ended,
+throttled so a crash-loop sends one per 15 minutes. A clean exit (Ctrl+C /
+shutdown) stops the supervisor.
 
 Two consequences of running before logon are worth knowing:
 

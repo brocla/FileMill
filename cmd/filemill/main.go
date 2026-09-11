@@ -112,6 +112,9 @@ func main() {
 		alertCtx, stopAlerts := context.WithCancel(context.Background())
 		defer stopAlerts()
 		var alertsDone chan struct{}
+		// reporter takes run's own restart alert: the Emailer once it is wired,
+		// otherwise nothing.
+		var reporter alert.Reporter = alert.Nop{}
 		if !once {
 			mailLog := log.New(io.MultiWriter(os.Stderr, application.LogWriter()), "mailgun ", log.LstdFlags|log.LUTC)
 			mail, err := mailgun.Load(root, application, mailLog)
@@ -129,6 +132,7 @@ func main() {
 					emailer = alert.NewEmailer(mail, application, to, mail.AlertConfig(), time.Now, alertLog)
 					application.SetReporter(emailer)
 					mail.SetReporter(emailer)
+					reporter = emailer
 				}
 				server = &http.Server{Addr: os.Getenv("LISTEN_ADDR"), Handler: mail.Handler()}
 				if server.Addr == "" {
@@ -175,6 +179,17 @@ func main() {
 			// this sweep runs unconditionally in continuous mode rather than
 			// nested under the mailgun branch above.
 			go application.SweepExpiredJobs(ctx)
+		}
+		// Only a starting worker may conclude that a job left running is
+		// orphaned, and only here: past the bind, so a second worker that lost
+		// the port has already exited without touching the first one's jobs.
+		// Other commands open the same database and never do this.
+		interrupted, err := application.InterruptLeftoverJobs()
+		if err != nil {
+			fatal(err)
+		}
+		if restart, ok := restartAlert(os.Getenv(previousExitEnv), os.Getenv(rapidRestartsEnv), interrupted); ok {
+			reporter.Report(restart)
 		}
 		runErr := application.Run(ctx, once)
 		if server != nil {

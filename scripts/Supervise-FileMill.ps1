@@ -10,7 +10,10 @@
     lasts long enough to be "healthy" resets the backoff. A clean exit (code 0,
     i.e. an intentional Ctrl+C / OS shutdown signal) stops the supervisor.
 
-    A crash-loop is logged only, for now; alerting is tracked in issue #7.
+    A crashed worker can't report its own death, so each relaunch is told how
+    the last one ended: FILEMILL_PREVIOUS_EXIT (unset on the first launch) and
+    FILEMILL_RAPID_RESTARTS. The restarted worker emails one `restart` alert
+    from them when operator alerts are on (alert_recipient in email.yaml).
     Supervisor events are written to data\logs\supervisor.log; the worker's own
     output continues to go to data\logs\filemill.log.
 #>
@@ -46,12 +49,19 @@ function Write-SupervisorLog {
 # Restart policy.
 $backoffSeconds    = @(0, 5, 15, 30, 60, 120) # immediate first retry, then escalate (capped)
 $healthyRunSeconds = 60                        # a run at least this long resets the backoff
-$crashLoopAt       = 4                         # rapid restarts before logging a crash-loop warning
+$crashLoopAt       = 4                         # rapid restarts before logging a crash-loop warning (cmd/filemill/restart.go matches it)
 
 $rapidFailures = 0
+$previousExit = $null
+# The first launch is not a restart, whatever the environment says.
+Remove-Item Env:FILEMILL_PREVIOUS_EXIT, Env:FILEMILL_RAPID_RESTARTS -ErrorAction SilentlyContinue
 Write-SupervisorLog "starting; watching $Executable"
 
 while ($true) {
+    if ($null -ne $previousExit) {
+        $env:FILEMILL_PREVIOUS_EXIT = "$previousExit"
+        $env:FILEMILL_RAPID_RESTARTS = "$rapidFailures"
+    }
     $startedAt = Get-Date
     Write-SupervisorLog 'launching: filemill run'
     & $Executable run
@@ -65,6 +75,7 @@ while ($true) {
         Write-SupervisorLog 'clean exit (intentional stop); supervisor stopping'
         break
     }
+    $previousExit = $exitCode
 
     if ($ranSeconds -ge $healthyRunSeconds) {
         $rapidFailures = 0
@@ -73,7 +84,7 @@ while ($true) {
         $delay = $backoffSeconds[[Math]::Min($rapidFailures, $backoffSeconds.Count - 1)]
         $rapidFailures++
         if ($rapidFailures -ge $crashLoopAt) {
-            Write-SupervisorLog "WARNING crash-loop: $rapidFailures rapid restarts (log-only; alerting tracked in issue #7)"
+            Write-SupervisorLog "WARNING crash-loop: $rapidFailures rapid restarts"
         }
     }
 

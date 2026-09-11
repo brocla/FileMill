@@ -130,10 +130,6 @@ func Open(path string) (*Store, error) {
 		db.Close()
 		return nil, fmt.Errorf("migrate email_submissions: %w", err)
 	}
-	if _, err := db.Exec("UPDATE jobs SET status=?, completed_at=? WHERE status=?", StatusInterrupted, time.Now().UTC().Format(time.RFC3339Nano), StatusRunning); err != nil {
-		db.Close()
-		return nil, err
-	}
 	return s, nil
 }
 
@@ -451,6 +447,27 @@ func (s *Store) Complete(id, status, message string) error {
 	_, err := s.db.Exec("UPDATE jobs SET status=?, message=?, completed_at=? WHERE id=?", status, message, time.Now().UTC().Format(time.RFC3339Nano), id)
 	return err
 }
+
+// interruptedMessage is an interrupted job's message. The sender's reply is
+// built from it and the job is not retried, so it says what to do.
+const interruptedMessage = "interrupted: FileMill stopped while this job was running; please send the file again"
+
+// InterruptRunning marks every running job interrupted and returns how many.
+// Only a worker starting up may call it: none of its own jobs is running yet,
+// so any job still running was orphaned by a predecessor that died. Open
+// doesn't do this, because every CLI command opens the same database, and one
+// run while the worker is mid-job would mark that live job interrupted, which
+// the delivery loop takes as finished.
+func (s *Store) InterruptRunning() (int, error) {
+	res, err := s.db.Exec("UPDATE jobs SET status=?, message=?, completed_at=? WHERE status=?",
+		StatusInterrupted, interruptedMessage, time.Now().UTC().Format(time.RFC3339Nano), StatusRunning)
+	if err != nil {
+		return 0, err
+	}
+	n, err := res.RowsAffected()
+	return int(n), err
+}
+
 // ExpiredJobs returns ids of jobs that finished before cutoff and whose
 // workspace the job sweep has not yet deleted from data/jobs. Only
 // completed_at is checked, not created_at, so a job still queued or running
