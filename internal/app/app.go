@@ -10,16 +10,32 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime/debug"
 	"strings"
 	"time"
 
+	"filemill/internal/alert"
 	"filemill/internal/config"
 	"filemill/internal/contract"
 	"filemill/internal/store"
 	"github.com/google/uuid"
 )
 
-const timeout = 10 * time.Minute
+// jobTimeout bounds one transformer run. A var, not a const, so the timeout
+// test can shrink it rather than wait 10 minutes.
+var jobTimeout = 10 * time.Minute
+
+// claimAlertAfter is how long job claims must keep failing before Run reports
+// it: a blip clears itself, a stuck database halts all work. A var so Run's
+// test need not wait a minute.
+var claimAlertAfter = time.Minute
+
+// outputTailSize is how much of a transformer's output an alert carries.
+const outputTailSize = 2048
+
+// panicMessage is a job's message after a panic. The sender reads it in the
+// reply, so it says no more than that the fault was ours.
+const panicMessage = "internal error while running the job"
 
 // ErrRejected marks a Submit failure caused by unacceptable input — a wrong
 // file type, a directory, or an unknown operation. The input itself is the
@@ -34,6 +50,7 @@ type App struct {
 	store      *store.Store
 	log        *log.Logger
 	logFile    *os.File
+	reporter   alert.Reporter
 }
 type OutputFile struct{ Name, Path string }
 
@@ -58,9 +75,20 @@ func Open(root string) (*App, error) {
 		s.Close()
 		return nil, err
 	}
-	return &App{root: root, data: data, cfg: cfg, store: s, log: log.New(lf, "", log.LstdFlags|log.LUTC), logFile: lf}, nil
+	return &App{root: root, data: data, cfg: cfg, store: s, log: log.New(lf, "", log.LstdFlags|log.LUTC), logFile: lf, reporter: alert.Nop{}}, nil
 }
 func (a *App) Close() error { a.logFile.Close(); return a.store.Close() }
+
+// SetReporter routes the worker's systemic failures to r; nil restores the
+// no-op default. It is a setter, not an Open argument, because the real
+// reporter needs the Mailgun service, which is built after the App. Call it
+// before Run.
+func (a *App) SetReporter(r alert.Reporter) {
+	if r == nil {
+		r = alert.Nop{}
+	}
+	a.reporter = r
+}
 
 // LogWriter exposes the application log sink so adapters (e.g. the Mailgun
 // webhook) can write to the same filemill.log the worker uses.
@@ -180,6 +208,7 @@ func (a *App) MarkDeliveryDeleted(submissionID int64, outputIndex int) error {
 }
 func (a *App) Run(ctx context.Context, once bool) error {
 	a.log.Printf("worker started once=%t", once)
+	var claims claimFailures
 	for {
 		j, err := a.store.Next()
 		if err != nil {
@@ -187,8 +216,17 @@ func (a *App) Run(ctx context.Context, once bool) error {
 				return err
 			}
 			// A transient store error (e.g. SQLITE_BUSY under load) must not
-			// take down the worker: log it, back off, and retry.
+			// take down the worker: log it, back off, and retry. One that
+			// persists halts all work, so it is reported.
 			a.log.Printf("worker claim error: %v", err)
+			if claims.failed(time.Now()) {
+				a.reporter.Report(alert.Alert{
+					Category: "worker-claim",
+					Summary:  "worker cannot claim jobs",
+					Detail: fmt.Sprintf("Claiming the next job has failed continuously since %s, so no job can run.\n\nLatest error: %v\n",
+						claims.since.Format(time.RFC3339), err),
+				})
+			}
 			select {
 			case <-ctx.Done():
 				return nil
@@ -196,6 +234,7 @@ func (a *App) Run(ctx context.Context, once bool) error {
 			}
 			continue
 		}
+		claims.succeeded()
 		if j != nil {
 			a.execute(ctx, *j)
 			if once {
@@ -214,14 +253,50 @@ func (a *App) Run(ctx context.Context, once bool) error {
 		}
 	}
 }
+
+// claimFailures tracks an unbroken run of failed job claims, so Run reports
+// one that has lasted claimAlertAfter, and only once per run.
+type claimFailures struct {
+	since    time.Time // the run's first failure; zero while claims work
+	reported bool
+}
+
+// failed records a failed claim at now and reports whether to alert.
+func (c *claimFailures) failed(now time.Time) bool {
+	if c.since.IsZero() {
+		c.since = now
+	}
+	if c.reported || now.Sub(c.since) < claimAlertAfter {
+		return false
+	}
+	c.reported = true
+	return true
+}
+
+func (c *claimFailures) succeeded() { *c = claimFailures{} }
+
+// execute runs one job and records how it ended. A failure the transformer
+// reported through the contract (a valid result.json with success:false) is
+// the sender's problem and the reply tells them. Any other failure is
+// FileMill's problem and is reported as well.
 func (a *App) execute(parent context.Context, j store.Job) {
+	// A panic fails this job, not the worker: execute returns normally and Run
+	// moves on to the next job.
+	defer func() {
+		if r := recover(); r != nil {
+			a.log.Printf("job=%s panic=%v", j.ID, r)
+			a.finish(j.ID, store.StatusFailed, panicMessage)
+			a.reportJob("panic", j, fmt.Sprintf("%s job panicked: %v", j.Operation, r), panicMessage,
+				fmt.Sprintf("Panic: %v\n\n%s", r, debug.Stack()))
+		}
+	}()
 	t, ok := a.cfg.Find(j.Operation)
 	if !ok {
-		a.finish(j.ID, store.StatusFailed, "registered transformer no longer exists")
+		a.failSystemic(j, "registered transformer no longer exists", nil, nil)
 		return
 	}
 	workspace := filepath.Join(a.data, "jobs", j.ID)
-	ctx, cancel := context.WithTimeout(parent, timeout)
+	ctx, cancel := context.WithTimeout(parent, jobTimeout)
 	defer cancel()
 	args := append(append([]string{}, t.Command[1:]...), "job.json")
 	cmd := exec.CommandContext(ctx, t.Command[0], args...)
@@ -231,7 +306,7 @@ func (a *App) execute(parent context.Context, j store.Job) {
 		a.log.Printf("job=%s transformer_output=%s", j.ID, strings.TrimSpace(string(output)))
 	}
 	if ctx.Err() == context.DeadlineExceeded {
-		a.finish(j.ID, store.StatusFailed, "transformer timed out after 10 minutes")
+		a.failSystemic(j, "transformer timed out after 10 minutes", nil, output)
 		return
 	}
 	result, readErr := readResult(filepath.Join(workspace, "result.json"), workspace)
@@ -240,11 +315,23 @@ func (a *App) execute(parent context.Context, j store.Job) {
 		if readErr == nil && result.Message != "" {
 			msg = result.Message
 		}
-		a.finish(j.ID, store.StatusFailed, msg)
+		switch {
+		case readErr == nil && !result.Success:
+			// Turned down through the contract, whatever the exit code.
+			a.finish(j.ID, store.StatusFailed, msg)
+		case parent.Err() != nil:
+			// The worker is shutting down and killed the transformer. That is
+			// FileMill stopping, not the transformer failing.
+			a.finish(j.ID, store.StatusFailed, msg)
+		case readErr != nil:
+			a.failSystemic(j, msg, fmt.Errorf("%w; %w", err, readErr), output)
+		default:
+			a.failSystemic(j, msg, fmt.Errorf("result.json reports success, but the transformer ended with %w", err), output)
+		}
 		return
 	}
 	if readErr != nil {
-		a.finish(j.ID, store.StatusFailed, readErr.Error())
+		a.failSystemic(j, readErr.Error(), nil, output)
 		return
 	}
 	if !result.Success {
@@ -260,6 +347,42 @@ func (a *App) finish(id, status, message string) {
 	}
 	a.log.Printf("job=%s status=%s message=%q", id, status, message)
 }
+
+// failSystemic fails a job the transformer didn't handle through the contract
+// and reports it. cause adds what the job's message leaves out, such as the
+// exit status.
+func (a *App) failSystemic(j store.Job, message string, cause error, output []byte) {
+	a.finish(j.ID, store.StatusFailed, message)
+	var extra strings.Builder
+	if cause != nil {
+		fmt.Fprintf(&extra, "Cause: %v\n", cause)
+	}
+	if tail := outputTail(output); tail != "" {
+		fmt.Fprintf(&extra, "\nTransformer output (last 2 KB):\n%s\n", tail)
+	}
+	a.reportJob("job-systemic", j, fmt.Sprintf("%s job failed: %s", j.Operation, message), message, extra.String())
+}
+
+// reportJob reports a failed job, identified the same way in every alert.
+func (a *App) reportJob(category string, j store.Job, summary, message, extra string) {
+	detail := fmt.Sprintf("Job: %s\nOperation: %s\nInput: %s\nMessage: %s\n", j.ID, j.Operation, j.InputName, message)
+	if extra != "" {
+		detail += "\n" + extra
+	}
+	a.reporter.Report(alert.Alert{Category: category, Summary: strings.Join(strings.Fields(summary), " "), Detail: detail})
+}
+
+// outputTail returns the end of a transformer's output, where a crash's
+// traceback lands, capped at outputTailSize bytes.
+func outputTail(output []byte) string {
+	s := strings.TrimSpace(string(output))
+	if len(s) <= outputTailSize {
+		return s
+	}
+	// The cut may split a multi-byte character; drop what is left of it.
+	return "…" + strings.ToValidUTF8(s[len(s)-outputTailSize:], "")
+}
+
 func readResult(path, workspace string) (contract.Result, error) {
 	b, err := os.ReadFile(path)
 	if err != nil {
