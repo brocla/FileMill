@@ -16,6 +16,9 @@ import (
 	"filemill/internal/store"
 )
 
+// main.go hands the App to the alert Emailer as its throttle ledger.
+var _ alert.Ledger = (*App)(nil)
+
 // fakeTransformerArg, as the test binary's first argument, makes it act as a
 // transformer instead of running tests. See TestMain.
 const fakeTransformerArg = "-filemill-fake-transformer"

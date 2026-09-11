@@ -206,6 +206,17 @@ func (a *App) ExpiredDeliveries(cutoff time.Time) ([]store.Delivery, error) {
 func (a *App) MarkDeliveryDeleted(submissionID int64, outputIndex int) error {
 	return a.store.MarkDeliveryDeleted(submissionID, outputIndex)
 }
+
+// The alert throttle's state lives in the job database, so a restarted worker
+// inherits it. main hands the App to alert.NewEmailer as its Ledger.
+func (a *App) LastAlert(category string) (time.Time, int, error) { return a.store.LastAlert(category) }
+func (a *App) RecordAlertSent(category string, at time.Time) error {
+	return a.store.RecordAlertSent(category, at)
+}
+func (a *App) RecordAlertSuppressed(category string) error {
+	return a.store.RecordAlertSuppressed(category)
+}
+func (a *App) AlertSendsSince(t time.Time) ([]time.Time, error) { return a.store.AlertSendsSince(t) }
 func (a *App) Run(ctx context.Context, once bool) error {
 	a.log.Printf("worker started once=%t", once)
 	var claims claimFailures

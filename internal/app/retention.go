@@ -2,9 +2,13 @@ package app
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
+
+	"filemill/internal/alert"
 )
 
 // jobRetentionPeriod is how long a completed job's workspace stays on disk
@@ -16,6 +20,10 @@ import (
 // Engine, but App talks to a concrete *store.Store with no such seam, so its
 // own test shrinks this instead of waiting 30 real days.
 var jobRetentionPeriod = 30 * 24 * time.Hour
+
+// removeWorkspace deletes one job's workspace. A var so the sweep's test can
+// make a delete fail, which the filesystem won't do on request.
+var removeWorkspace = os.RemoveAll
 
 const (
 	// jobSweepInterval mirrors mailgun's retention sweep: retention is measured
@@ -55,9 +63,9 @@ func (a *App) SweepExpiredJobs(ctx context.Context) {
 //
 // A workspace that fails to delete is logged and left unmarked, so the next
 // sweep retries it; one stuck directory must not strand the rest of the
-// batch. RemoveAll is idempotent — a workspace already gone counts as
-// deleted — so marking a job after a crash-interrupted sweep is never a
-// problem.
+// batch. The failures are reported together, once per sweep. RemoveAll is
+// idempotent — a workspace already gone counts as deleted — so marking a job
+// after a crash-interrupted sweep is never a problem.
 //
 // A sweep that deleted something says so; an idle one stays silent, so the
 // line means something when it does appear — the same reasoning as
@@ -68,9 +76,11 @@ func (a *App) sweepExpiredJobs() error {
 		return err
 	}
 	deleted := 0
+	var failed []string
 	for _, id := range ids {
-		if err := os.RemoveAll(filepath.Join(a.data, "jobs", id)); err != nil {
+		if err := removeWorkspace(filepath.Join(a.data, "jobs", id)); err != nil {
 			a.log.Printf("job sweep: delete %s: %v", id, err)
+			failed = append(failed, fmt.Sprintf("%s: %v", id, err))
 			continue
 		}
 		deleted++
@@ -78,8 +88,17 @@ func (a *App) sweepExpiredJobs() error {
 			a.log.Printf("job sweep: record deletion of %s: %v", id, err)
 		}
 	}
+	days := int(jobRetentionPeriod.Hours() / 24)
 	if deleted > 0 {
-		a.log.Printf("job sweep: deleted %d job workspace(s) older than %d days", deleted, int(jobRetentionPeriod.Hours()/24))
+		a.log.Printf("job sweep: deleted %d job workspace(s) older than %d days", deleted, days)
+	}
+	if len(failed) > 0 {
+		a.reporter.Report(alert.Alert{
+			Category: "sweep-jobs",
+			Summary:  fmt.Sprintf("job sweep could not delete %d workspace(s)", len(failed)),
+			Detail: fmt.Sprintf("These completed jobs are past the %d-day retention period, but their workspaces under data/jobs could not be deleted. The next sweep retries them.\n\n%s\n",
+				days, strings.Join(failed, "\n")),
+		})
 	}
 	return nil
 }
