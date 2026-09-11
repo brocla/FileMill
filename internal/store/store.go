@@ -115,6 +115,17 @@ func Open(path string) (*Store, error) {
 		db.Close()
 		return nil, err
 	}
+	// Operator-alert throttle state (internal/alert), kept here so a restarted
+	// worker inherits it. last_sent_at is NULL for a category a global cap held
+	// back before it ever sent. alert_sends exists only for those caps and is
+	// pruned to 24h on write.
+	_, err = db.Exec(`CREATE TABLE IF NOT EXISTS alert_state (
+ category TEXT PRIMARY KEY, last_sent_at TEXT, suppressed INTEGER NOT NULL DEFAULT 0
+); CREATE TABLE IF NOT EXISTS alert_sends (sent_at TEXT NOT NULL);`)
+	if err != nil {
+		db.Close()
+		return nil, err
+	}
 	if err := migrateSubmissionKey(db); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("migrate email_submissions: %w", err)
