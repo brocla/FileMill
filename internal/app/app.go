@@ -216,6 +216,7 @@ func (a *App) RecordAlertSent(category string, at time.Time) error {
 func (a *App) RecordAlertSuppressed(category string) error {
 	return a.store.RecordAlertSuppressed(category)
 }
+func (a *App) ClearSuppressed(category string) error            { return a.store.ClearSuppressed(category) }
 func (a *App) AlertSendsSince(t time.Time) ([]time.Time, error) { return a.store.AlertSendsSince(t) }
 
 // InterruptLeftoverJobs marks the jobs a dead predecessor left running as

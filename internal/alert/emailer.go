@@ -131,7 +131,9 @@ func (e *Emailer) drain(ctx context.Context) {
 //
 // The send is recorded before it is attempted, and a failed send is logged
 // and dropped, never retried or re-reported. It still counts against the
-// caps: a send that timed out may have reached Mailgun and been charged.
+// caps: a send that timed out may have reached Mailgun and been charged. The
+// suppressed count is the exception: only a delivered email clears it, since
+// it is the one place held-back alerts are ever reported.
 func (e *Emailer) handle(ctx context.Context, a Alert) {
 	defer func() {
 		if r := recover(); r != nil {
@@ -170,7 +172,18 @@ func (e *Emailer) handle(ctx context.Context, a Alert) {
 	subject, text := e.compose(a, suppressed, capReopens)
 	if err := e.mailer.SendAlert(ctx, e.to, subject, text); err != nil {
 		e.log.Printf("alert %s: send failed: %v; dropped: %s", a.Category, err, a.Summary)
+		// Nobody saw this one either, so it joins the backlog the next email
+		// reports, and the ones already counted stay counted.
+		e.mem.recordSuppressed(a.Category)
+		if err := e.ledger.RecordAlertSuppressed(a.Category); err != nil {
+			e.ledgerFailed(err)
+		}
 		return
+	}
+	// Only an email that went out clears the backlog it just reported.
+	e.mem.clearSuppressed(a.Category)
+	if err := e.ledger.ClearSuppressed(a.Category); err != nil {
+		e.ledgerFailed(err)
 	}
 	e.log.Printf("alert %s: sent: %s", a.Category, a.Summary)
 }
@@ -287,8 +300,9 @@ func (m *memLedger) read(category string, since time.Time) (time.Time, int, []ti
 
 func (m *memLedger) recordSent(category string, at time.Time) {
 	m.lastSent[category] = at
-	m.suppressed[category] = 0
 	m.sends = append(slices.DeleteFunc(m.sends, func(t time.Time) bool { return !t.After(at.Add(-day)) }), at)
 }
+
+func (m *memLedger) clearSuppressed(category string) { m.suppressed[category] = 0 }
 
 func (m *memLedger) recordSuppressed(category string) { m.suppressed[category]++ }

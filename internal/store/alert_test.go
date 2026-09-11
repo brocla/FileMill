@@ -54,7 +54,10 @@ func TestAlertSuppressedBeforeAnySend(t *testing.T) {
 	}
 }
 
-func TestRecordAlertSentStoresTimeAndResetsSuppressed(t *testing.T) {
+// Recording a send and clearing the backlog are separate steps: the send is
+// recorded before it is attempted, to keep the caps exact, but the count of
+// held-back alerts survives until one actually goes out.
+func TestRecordAlertSentKeepsSuppressedUntilCleared(t *testing.T) {
 	s, _ := openTestStore(t)
 	at := time.Date(2026, 9, 11, 9, 30, 15, 123456789, time.UTC)
 
@@ -68,8 +71,15 @@ func TestRecordAlertSentStoresTimeAndResetsSuppressed(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !sentAt.Equal(at) || suppressed != 0 {
-		t.Fatalf("LastAlert = %v, %d; want %v, 0", sentAt, suppressed, at)
+	if !sentAt.Equal(at) || suppressed != 1 {
+		t.Fatalf("LastAlert = %v, %d; want %v, 1", sentAt, suppressed, at)
+	}
+
+	if err := s.ClearSuppressed("delivery"); err != nil {
+		t.Fatal(err)
+	}
+	if _, suppressed, _ := s.LastAlert("delivery"); suppressed != 0 {
+		t.Fatalf("suppressed after ClearSuppressed = %d, want 0", suppressed)
 	}
 	// Other categories are untouched.
 	if other, _, _ := s.LastAlert("intake"); !other.IsZero() {

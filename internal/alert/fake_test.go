@@ -74,8 +74,17 @@ func (l *fakeLedger) RecordAlertSent(category string, at time.Time) error {
 		return l.writeErr
 	}
 	l.lastSent[category] = at
-	l.suppressed[category] = 0
 	l.sent = append(l.sent, at)
+	return nil
+}
+
+func (l *fakeLedger) ClearSuppressed(category string) error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.writeErr != nil {
+		return l.writeErr
+	}
+	l.suppressed[category] = 0
 	return nil
 }
 

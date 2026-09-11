@@ -387,6 +387,35 @@ func TestSubjectIsOneLine(t *testing.T) {
 	}
 }
 
+// The next email that goes out is the only place held-back alerts are ever
+// reported, so a send that fails must not take the count with it. The alert
+// whose send failed joins the backlog: nobody saw it either.
+func TestFailedSendKeepsTheSuppressedCount(t *testing.T) {
+	h := newHarness(t)
+	h.report("delivery", "reply send failing")
+	for range 3 {
+		h.clock.Advance(time.Minute)
+		h.report("delivery", "reply send failing")
+	}
+
+	h.mailer.err = errors.New("mailgun: 500 Internal Server Error")
+	h.clock.Advance(15 * time.Minute)
+	h.report("delivery", "reply send failing")
+
+	h.mailer.err = nil
+	h.clock.Advance(15 * time.Minute)
+	h.report("delivery", "reply send failing")
+
+	sent := h.mailer.sends()
+	if len(sent) != 3 {
+		t.Fatalf("send attempts = %d, want 3 (first ok, second failed, third ok)", len(sent))
+	}
+	// 3 held back by the cooldown, plus the one whose send failed.
+	if !strings.Contains(sent[2].text, "4 more since the last alert") {
+		t.Errorf("the recovered email should carry every alert nobody saw:\n%s", sent[2].text)
+	}
+}
+
 func TestNopReportDoesNothing(t *testing.T) {
 	Nop{}.Report(Alert{Category: "panic", Summary: "ignored"})
 }

@@ -40,8 +40,9 @@ func (s *Store) LastAlert(category string) (time.Time, int, error) {
 	return t, suppressed, nil
 }
 
-// RecordAlertSent records a send in category at at, resets its suppressed
-// count, and prunes sends too old for any cap window.
+// RecordAlertSent records a send in category at at and prunes sends too old
+// for any cap window. The suppressed count is left alone: a send that then
+// fails reported nothing, so ClearSuppressed is what zeroes it.
 func (s *Store) RecordAlertSent(category string, at time.Time) error {
 	tx, err := s.db.Begin()
 	if err != nil {
@@ -49,7 +50,7 @@ func (s *Store) RecordAlertSent(category string, at time.Time) error {
 	}
 	defer tx.Rollback()
 	if _, err := tx.Exec(`INSERT INTO alert_state(category,last_sent_at,suppressed) VALUES(?,?,0)
- ON CONFLICT(category) DO UPDATE SET last_sent_at=excluded.last_sent_at, suppressed=0`, category, formatAlertTime(at)); err != nil {
+ ON CONFLICT(category) DO UPDATE SET last_sent_at=excluded.last_sent_at`, category, formatAlertTime(at)); err != nil {
 		return err
 	}
 	if _, err := tx.Exec("INSERT INTO alert_sends(sent_at) VALUES(?)", formatAlertTime(at)); err != nil {
@@ -59,6 +60,13 @@ func (s *Store) RecordAlertSent(category string, at time.Time) error {
 		return err
 	}
 	return tx.Commit()
+}
+
+// ClearSuppressed zeroes category's suppressed count, once an email carrying
+// it has gone out. A category with no row has nothing to clear.
+func (s *Store) ClearSuppressed(category string) error {
+	_, err := s.db.Exec("UPDATE alert_state SET suppressed=0 WHERE category=?", category)
+	return err
 }
 
 // RecordAlertSuppressed counts one held-back alert against category.

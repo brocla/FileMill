@@ -39,11 +39,15 @@ type Ledger interface {
 	// have been suppressed since. A zero sentAt means it has never sent; it
 	// can still have a suppressed count, held back by a global cap.
 	LastAlert(category string) (sentAt time.Time, suppressed int, err error)
-	// RecordAlertSent records a send at at and resets category's suppressed
-	// count.
+	// RecordAlertSent records a send at at. It leaves the suppressed count
+	// alone: a send that then fails reported nothing, so the count must
+	// survive for the next email that does go out.
 	RecordAlertSent(category string, at time.Time) error
 	// RecordAlertSuppressed increments category's suppressed count.
 	RecordAlertSuppressed(category string) error
+	// ClearSuppressed zeroes category's suppressed count, once an email
+	// carrying it has been sent.
+	ClearSuppressed(category string) error
 	// AlertSendsSince returns the time of every send after t, in any
 	// category, oldest first. It must cover at least the last 24h.
 	AlertSendsSince(t time.Time) ([]time.Time, error)
