@@ -49,7 +49,7 @@ them, and being honest about what email **cannot** report.
 | Valid `result.json` with `success:false` | `execute` | No | — | Sender told in the reply |
 | **Panic while running a job** | `execute` (new `recover`) | **Yes** | `panic` | Job marked failed; worker continues |
 | **Reply send failing** (non-2xx, timeout) for ≥5 min | `outbound.go` `deliver` | **Yes** | `delivery` | Time-based, not per tick, to ride out a blip (§3.5) |
-| **`MarkEmailDelivered` failing after a successful send** | `deliver` | **Yes, no grace period** | `delivery-mark` | Resends the reply **every second** (#6). Most urgent alert in the table |
+| **`MarkEmailDelivered` failing after a successful send** | `deliver` | **Yes, no grace period** | `delivery-mark` | The database is failing. Only the mark is retried, not the send (§3.5), but every restart until it recovers sends one duplicate reply |
 | **Sheets-link publish failing** (token expired, quota, Drive outage) | `deliver` → `publish` | **Yes** | `publish` | Can persist for hours |
 | **Drive file orphaned** (`PutDelivery` failed after upload) | `publish` | **Yes** | `publish-orphan` | Names the file ID for manual cleanup |
 | **Job claim error** (`store.Next`) persisting ≥1 min | `app.go` `Run` | **Yes** | `worker-claim` | Today it retries silently forever; a stuck DB halts all work |
@@ -196,12 +196,17 @@ A 3-tick grace period is 3 seconds, which isn't a blip ride-out. Instead
 `Service` keeps an in-memory `firstFailure map[int64]time.Time` keyed by
 submission ID. It is set on the first failure, cleared on success, and alerts
 (`delivery` or `publish`) once a submission has failed for ≥5 min.
-`MarkEmailDelivered` failures skip the grace period, because each second of delay
-is another duplicate reply.
+`MarkEmailDelivered` failures skip the grace period: the database is failing, and
+every restart until it recovers sends the sender one more duplicate.
 
-This map is the natural first step toward #6's per-submission failure count and
-dead-letter state. Building #6's retry cap at the same time would remove the
-resend storm that `delivery-mark` exists to report.
+The resend storm is fixed ahead of phase 3. It used to happen when the send
+succeeded but the mark failed, so the reply went out again on every 1-second
+tick. Now `Service.sentUnmarked` remembers a submission whose reply Mailgun
+accepted, and later ticks retry only the mark. #6's crash window (a crash between
+send and mark, or a send that timed out on our side after Mailgun accepted it) is
+accepted and documented on `deliver`: each costs one duplicate. A per-submission
+retry cap and dead-letter state is a separate future issue, and this map is its
+natural first step.
 
 ### 3.6 Reporting crashes across a restart
 
@@ -314,6 +319,6 @@ Phases 2 and 3 are about 1 day together. Phase 4 is half a day.
    for `delivery-mark`.
 5. **Heartbeat:** out of scope here, tracked as #5. It is the only cover for
    startup fatals, a Mailgun outage, and a machine that is off.
-6. **Ordering with #6:** do #6's retry cap before or alongside Phase 3. Otherwise
-   the first real `delivery-mark` alert arrives *after* the sender has already had
-   dozens of duplicate replies.
+6. **Ordering with #6:** done before Phase 3. A failed mark no longer resends the
+   reply every second (§3.5). #6's crash window is accepted and documented. The
+   retry cap and dead-letter state for stuck submissions will be their own issue.
