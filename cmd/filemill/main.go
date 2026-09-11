@@ -13,6 +13,7 @@ import (
 	"syscall"
 	"time"
 
+	"filemill/internal/alert"
 	"filemill/internal/app"
 	"filemill/internal/mailgun"
 )
@@ -80,6 +81,13 @@ func main() {
 		defer cancel()
 		var server *http.Server
 		serverErrs := make(chan error, 1)
+		// The alert Emailer runs on a context of its own, stopped only after the
+		// job loop and the webhook server have finished, so an alert raised
+		// while they shut down still goes out. alertsDone closes once it has
+		// drained.
+		alertCtx, stopAlerts := context.WithCancel(context.Background())
+		defer stopAlerts()
+		var alertsDone chan struct{}
 		if !once {
 			mailLog := log.New(io.MultiWriter(os.Stderr, application.LogWriter()), "mailgun ", log.LstdFlags|log.LUTC)
 			mail, err := mailgun.Load(root, application, mailLog)
@@ -87,6 +95,17 @@ func main() {
 				fatal(err)
 			}
 			if mail != nil {
+				// Operator alerts go out through the Mailgun adapter, from
+				// REPLY_FROM, so they exist only when it does. The reporters are
+				// set before any goroutine starts, so nothing reports into the
+				// no-op default by accident.
+				var emailer *alert.Emailer
+				if to := mail.AlertRecipient(); to != "" {
+					alertLog := log.New(io.MultiWriter(os.Stderr, application.LogWriter()), "alert ", log.LstdFlags|log.LUTC)
+					emailer = alert.NewEmailer(mail, application, to, mail.AlertConfig(), time.Now, alertLog)
+					application.SetReporter(emailer)
+					mail.SetReporter(emailer)
+				}
 				server = &http.Server{Addr: os.Getenv("LISTEN_ADDR"), Handler: mail.Handler()}
 				if server.Addr == "" {
 					server.Addr = ":8080"
@@ -107,6 +126,13 @@ func main() {
 					fatal(fmt.Errorf("webhook server: %w", err))
 				}
 				mailLog.Printf("FileMill %s — webhook listening on %s; delivery loop started", version, server.Addr)
+				if emailer != nil {
+					alertsDone = make(chan struct{})
+					go func() { emailer.Run(alertCtx); close(alertsDone) }()
+					mailLog.Printf("operator alerts: sent to %s", mail.AlertRecipient())
+				} else {
+					mailLog.Print("operator alerts: disabled (no alert_recipient in email.yaml)")
+				}
 				go func() {
 					if err := server.Serve(listener); err != nil && err != http.ErrServerClosed {
 						mailLog.Printf("server: %v", err)
@@ -133,6 +159,12 @@ func main() {
 			shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), 10*time.Second)
 			_ = server.Shutdown(shutdownCtx)
 			cancelShutdown()
+		}
+		if alertsDone != nil {
+			// Everything that reports has stopped. The Emailer sends what is
+			// still queued, for up to 5 seconds, then returns.
+			stopAlerts()
+			<-alertsDone
 		}
 		// Checked before runErr: when the listener is what failed, Run returns
 		// nil (it stopped because its context was cancelled), and reporting a
