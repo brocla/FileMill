@@ -16,8 +16,10 @@ package mailgun
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"net/http"
+	"runtime/debug"
 	"time"
 
 	"filemill/internal/alert"
@@ -135,6 +137,21 @@ func (s *Service) report(a alert.Alert) {
 	if s.reporter != nil {
 		s.reporter.Report(a)
 	}
+}
+
+// recoverLoop, deferred by one pass of a background loop, turns a panic into a
+// log line and a panic alert, so the loop carries on with its next pass.
+func (s *Service) recoverLoop(loop string) {
+	r := recover()
+	if r == nil {
+		return
+	}
+	s.log.Printf("%s: panic: %v", loop, r)
+	s.report(alert.Alert{
+		Category: "panic",
+		Summary:  fmt.Sprintf("%s panicked: %v", loop, r),
+		Detail:   fmt.Sprintf("The %s recovered and carries on with its next pass.\n\nPanic: %v\n\n%s", loop, r, debug.Stack()),
+	})
 }
 
 func (s *Service) clock() time.Time {

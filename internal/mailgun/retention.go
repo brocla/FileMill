@@ -36,10 +36,17 @@ func (s *Service) SweepExpired(ctx context.Context) {
 			return
 		case <-timer.C:
 		}
-		if err := s.sweepExpired(ctx); err != nil {
-			s.log.Printf("retention sweep: %v", err)
-		}
+		s.sweepTick(ctx)
 		timer.Reset(sweepInterval)
+	}
+}
+
+// sweepTick runs one sweep. A panic is logged and reported rather than ending
+// the loop, which would leave expired files shared in Drive indefinitely.
+func (s *Service) sweepTick(ctx context.Context) {
+	defer s.recoverLoop("retention sweep")
+	if err := s.sweepExpired(ctx); err != nil {
+		s.log.Printf("retention sweep: %v", err)
 	}
 }
 

@@ -53,6 +53,7 @@ type fakeEngine struct {
 	calls []string // ordered log of mutating calls
 
 	pending    []store.EmailSubmission
+	panicWith  any // when set, PendingEmails and ExpiredDeliveries panic with it
 	outputs    map[string][]app.OutputFile
 	outputsErr map[string]error // job id -> error Outputs should return
 
@@ -149,7 +150,12 @@ func (f *fakeEngine) AddEmailJob(id int64, index int, jobID string) error {
 	return nil
 }
 
-func (f *fakeEngine) PendingEmails() ([]store.EmailSubmission, error) { return f.pending, nil }
+func (f *fakeEngine) PendingEmails() ([]store.EmailSubmission, error) {
+	if f.panicWith != nil {
+		panic(f.panicWith)
+	}
+	return f.pending, nil
+}
 
 func (f *fakeEngine) MarkEmailDelivered(id int64) error {
 	f.markCalls++
@@ -195,6 +201,9 @@ func (f *fakeEngine) Delivery(submissionID int64, outputIndex int) (store.Delive
 }
 
 func (f *fakeEngine) ExpiredDeliveries(cutoff time.Time) ([]store.Delivery, error) {
+	if f.panicWith != nil {
+		panic(f.panicWith)
+	}
 	var out []store.Delivery
 	for key, d := range f.deliveries {
 		if !f.sweptDeliveries[key] && d.CreatedAt.Before(cutoff) {

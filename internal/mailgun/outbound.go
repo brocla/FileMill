@@ -35,14 +35,22 @@ func (s *Service) Deliver(ctx context.Context) {
 	ticker := time.NewTicker(deliveryPollInterval)
 	defer ticker.Stop()
 	for {
-		if err := s.deliverPending(ctx); err != nil {
-			s.log.Printf("delivery: %v", err)
-		}
+		s.deliverTick(ctx)
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
 		}
+	}
+}
+
+// deliverTick runs one pass of the delivery loop. A panic is logged and
+// reported rather than ending the loop, which would leave the worker running
+// with no replies going out.
+func (s *Service) deliverTick(ctx context.Context) {
+	defer s.recoverLoop("delivery loop")
+	if err := s.deliverPending(ctx); err != nil {
+		s.log.Printf("delivery: %v", err)
 	}
 }
 

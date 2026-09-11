@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime/debug"
 	"strings"
 	"time"
 
@@ -50,10 +51,27 @@ func (a *App) SweepExpiredJobs(ctx context.Context) {
 			return
 		case <-timer.C:
 		}
-		if err := a.sweepExpiredJobs(); err != nil {
-			a.log.Printf("job sweep: %v", err)
-		}
+		a.sweepJobsTick()
 		timer.Reset(jobSweepInterval)
+	}
+}
+
+// sweepJobsTick runs one sweep. A panic is logged and reported instead of
+// ending the loop, which would leave workspaces piling up past retention with
+// nothing to say so.
+func (a *App) sweepJobsTick() {
+	defer func() {
+		if r := recover(); r != nil {
+			a.log.Printf("job sweep: panic: %v", r)
+			a.reporter.Report(alert.Alert{
+				Category: "panic",
+				Summary:  fmt.Sprintf("job sweep panicked: %v", r),
+				Detail:   fmt.Sprintf("The job sweep recovered and runs again at its next interval.\n\nPanic: %v\n\n%s", r, debug.Stack()),
+			})
+		}
+	}()
+	if err := a.sweepExpiredJobs(); err != nil {
+		a.log.Printf("job sweep: %v", err)
 	}
 }
 
