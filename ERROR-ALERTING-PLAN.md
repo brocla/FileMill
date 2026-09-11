@@ -120,6 +120,17 @@ func (e *Emailer) Run(ctx context.Context) // started by main; drains the queue
   20/day keeps alerts to at most a fifth of the day's budget. When the daily cap
   is hit, one last alert says so ("daily alert cap reached; further alerts are
   logged only until <time>"); it counts within the 20, so the cap stays exact.
+- **A failing Ledger doesn't silence alerts.** A sick database is the likeliest
+  cause of `worker-claim` and `intake`, so dropping alerts when the Ledger fails
+  would silence exactly those. The `Emailer` keeps an in-memory copy of the
+  throttle state, synced from the Ledger on every good read. After the first
+  Ledger error, it throttles from that copy for the rest of the process, and
+  each email says so. It never switches back: if writes failed but reads still
+  worked, the Ledger would read back too few sends. The risk that remains is a
+  worker that crash-loops while its database opens but can't hold the ledger,
+  since the in-memory copy resets on every restart. A database that can't be
+  written usually fails `store.Open` instead, which is a startup `fatal` with no
+  reporter at all.
 - Clock, Mailer and Ledger are all injected, so the throttle is tested without
   sleeping, SQLite or the network.
 

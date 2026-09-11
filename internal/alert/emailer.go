@@ -57,6 +57,13 @@ func (c Config) withDefaults() Config {
 // Every alert passes a per-category cooldown and two global caps, all read
 // from the Ledger. A suppressed alert is logged and counted, and the next
 // email in its category says how many were held back.
+//
+// A failing Ledger does not silence alerts: a sick database is the likeliest
+// cause of the failures worth alerting on (worker-claim, intake). The Emailer
+// keeps an in-memory copy of the throttle state, in step with the Ledger while
+// it works, and after the first Ledger error it throttles from that copy for
+// the rest of the process. It never goes back: a Ledger whose writes failed
+// would read back too few sends, and the caps would leak.
 type Emailer struct {
 	mailer Mailer
 	ledger Ledger
@@ -65,12 +72,17 @@ type Emailer struct {
 	now    func() time.Time
 	log    *log.Logger
 	queue  chan Alert
+
+	// mem and ledgerErr are touched only by the goroutine running handle.
+	mem       *memLedger
+	ledgerErr error // the first Ledger error; non-nil means throttling from mem
 }
 
 func NewEmailer(m Mailer, l Ledger, to string, cfg Config, now func() time.Time, log *log.Logger) *Emailer {
 	return &Emailer{
 		mailer: m, ledger: l, to: to, cfg: cfg.withDefaults(), now: now, log: log,
 		queue: make(chan Alert, queueSize),
+		mem:   newMemLedger(),
 	}
 }
 
@@ -119,9 +131,7 @@ func (e *Emailer) drain(ctx context.Context) {
 //
 // The send is recorded before it is attempted, and a failed send is logged
 // and dropped, never retried or re-reported. It still counts against the
-// caps: a send that timed out may have reached Mailgun and been charged. For
-// the same reason the alert is dropped when the Ledger can't be read or
-// written: without it the caps can't be enforced.
+// caps: a send that timed out may have reached Mailgun and been charged.
 func (e *Emailer) handle(ctx context.Context, a Alert) {
 	defer func() {
 		if r := recover(); r != nil {
@@ -130,18 +140,9 @@ func (e *Emailer) handle(ctx context.Context, a Alert) {
 	}()
 
 	now := e.now()
-	sentAt, suppressed, err := e.ledger.LastAlert(a.Category)
-	if err != nil {
-		e.log.Printf("alert %s: read throttle state: %v; dropped: %s", a.Category, err, a.Summary)
-		return
-	}
+	sentAt, suppressed, sends := e.readState(a.Category, now.Add(-day))
 	if !sentAt.IsZero() && now.Sub(sentAt) < e.cfg.Cooldown {
 		e.suppress(a, "cooldown")
-		return
-	}
-	sends, err := e.ledger.AlertSendsSince(now.Add(-day))
-	if err != nil {
-		e.log.Printf("alert %s: read send history: %v; dropped: %s", a.Category, err, a.Summary)
 		return
 	}
 	if sentAfter(sends, now.Add(-time.Hour)) >= e.cfg.MaxPerHour {
@@ -160,12 +161,13 @@ func (e *Emailer) handle(ctx context.Context, a Alert) {
 	if len(sends) == e.cfg.MaxPerDay-1 {
 		capReopens = slices.MinFunc(append(sends, now), time.Time.Compare).Add(day)
 	}
-	subject, text := e.compose(a, suppressed, capReopens)
 
+	e.mem.recordSent(a.Category, now)
 	if err := e.ledger.RecordAlertSent(a.Category, now); err != nil {
-		e.log.Printf("alert %s: record send: %v; dropped: %s", a.Category, err, a.Summary)
-		return
+		e.ledgerFailed(err)
 	}
+	// Composed after recording, so an email whose own record failed says so.
+	subject, text := e.compose(a, suppressed, capReopens)
 	if err := e.mailer.SendAlert(ctx, e.to, subject, text); err != nil {
 		e.log.Printf("alert %s: send failed: %v; dropped: %s", a.Category, err, a.Summary)
 		return
@@ -173,11 +175,40 @@ func (e *Emailer) handle(ctx context.Context, a Alert) {
 	e.log.Printf("alert %s: sent: %s", a.Category, a.Summary)
 }
 
+// readState returns category's last send and suppressed count, and every send
+// after since, from the Ledger while it works and from mem after it fails.
+func (e *Emailer) readState(category string, since time.Time) (time.Time, int, []time.Time) {
+	if e.ledgerErr == nil {
+		sentAt, suppressed, err := e.ledger.LastAlert(category)
+		if err == nil {
+			var sends []time.Time
+			if sends, err = e.ledger.AlertSendsSince(since); err == nil {
+				e.mem.sync(category, sentAt, suppressed, sends)
+				return sentAt, suppressed, sends
+			}
+		}
+		e.ledgerFailed(err)
+	}
+	return e.mem.read(category, since)
+}
+
+// ledgerFailed switches the throttle to mem for the rest of the process. Only
+// the first error is logged; later writes are still attempted, so the next
+// process inherits as much history as the Ledger will take.
+func (e *Emailer) ledgerFailed(err error) {
+	if e.ledgerErr != nil {
+		return
+	}
+	e.ledgerErr = err
+	e.log.Printf("alert: throttle ledger failed: %v; throttling in memory until restart", err)
+}
+
 // suppress logs a held-back alert and counts it against its category.
 func (e *Emailer) suppress(a Alert, reason string) {
 	e.log.Printf("alert %s: suppressed (%s): %s", a.Category, reason, a.Summary)
+	e.mem.recordSuppressed(a.Category)
 	if err := e.ledger.RecordAlertSuppressed(a.Category); err != nil {
-		e.log.Printf("alert %s: record suppression: %v", a.Category, err)
+		e.ledgerFailed(err)
 	}
 }
 
@@ -202,6 +233,9 @@ func (e *Emailer) compose(a Alert, suppressed int, capReopens time.Time) (subjec
 	if suppressed > 0 {
 		fmt.Fprintf(&b, "\n%d more since the last alert in this category, suppressed by the throttle.\n", suppressed)
 	}
+	if e.ledgerErr != nil {
+		fmt.Fprintf(&b, "\nThe alert throttle's database state failed (%v), so it is throttling in memory until the worker restarts.\n", e.ledgerErr)
+	}
 	return subject, b.String()
 }
 
@@ -219,3 +253,42 @@ func sentAfter(sends []time.Time, t time.Time) int {
 // oneLine collapses whitespace, newlines included, so a summary carrying an
 // error's text still makes a single subject line.
 func oneLine(s string) string { return strings.Join(strings.Fields(s), " ") }
+
+// memLedger is the Emailer's in-memory copy of the throttle state. While the
+// Ledger works, every read syncs it; afterwards it is the throttle. Its send
+// history comes from the last good read plus every send since, so the global
+// caps carry over a Ledger failure. A category the Ledger was never read for
+// starts with no cooldown, but the caps still bound it.
+type memLedger struct {
+	lastSent   map[string]time.Time
+	suppressed map[string]int
+	sends      []time.Time
+}
+
+func newMemLedger() *memLedger {
+	return &memLedger{lastSent: map[string]time.Time{}, suppressed: map[string]int{}}
+}
+
+func (m *memLedger) sync(category string, sentAt time.Time, suppressed int, sends []time.Time) {
+	m.lastSent[category] = sentAt
+	m.suppressed[category] = suppressed
+	m.sends = slices.Clone(sends)
+}
+
+func (m *memLedger) read(category string, since time.Time) (time.Time, int, []time.Time) {
+	var sends []time.Time
+	for _, at := range m.sends {
+		if at.After(since) {
+			sends = append(sends, at)
+		}
+	}
+	return m.lastSent[category], m.suppressed[category], sends
+}
+
+func (m *memLedger) recordSent(category string, at time.Time) {
+	m.lastSent[category] = at
+	m.suppressed[category] = 0
+	m.sends = append(slices.DeleteFunc(m.sends, func(t time.Time) bool { return !t.After(at.Add(-day)) }), at)
+}
+
+func (m *memLedger) recordSuppressed(category string) { m.suppressed[category]++ }

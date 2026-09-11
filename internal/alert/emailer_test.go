@@ -219,19 +219,81 @@ func TestFailedSendIsLoggedNotRetried(t *testing.T) {
 	}
 }
 
-// Without throttle state the caps can't be enforced, so the alert is dropped
-// rather than sent blind.
-func TestLedgerErrorDropsAlert(t *testing.T) {
+// A sick database is the likeliest cause of the failures worth alerting on, so
+// a Ledger that can't be read must not silence alerts. The throttle carries on
+// in memory, cooldown and caps alike.
+func TestLedgerReadErrorThrottlesInMemory(t *testing.T) {
 	h := newHarness(t)
-	h.ledger.err = errors.New("database is locked")
+	h.ledger.readErr = errors.New("database is locked")
 
 	h.report("worker-claim", "job claim failing")
-
-	if n := len(h.mailer.sends()); n != 0 {
-		t.Fatalf("sent %d emails without throttle state, want 0", n)
+	sent := h.mailer.sends()
+	if len(sent) != 1 {
+		t.Fatalf("sent %d emails with an unreadable ledger, want 1", len(sent))
 	}
-	if !strings.Contains(h.logs.String(), "database is locked") {
-		t.Errorf("the ledger error should be logged; log:\n%s", h.logs)
+	if !strings.Contains(sent[0].text, "database is locked") {
+		t.Errorf("the email should say the throttle's state failed:\n%s", sent[0].text)
+	}
+
+	h.report("worker-claim", "job claim failing")
+	if n := len(h.mailer.sends()); n != 1 {
+		t.Fatalf("the in-memory cooldown let a repeat through: %d emails", n)
+	}
+
+	for i := range 12 {
+		h.report(fmt.Sprintf("cat-%02d", i), "failure")
+	}
+	if n := len(h.mailer.sends()); n != 10 {
+		t.Fatalf("the in-memory hourly cap allowed %d emails, want 10", n)
+	}
+	if n := strings.Count(h.logs.String(), "throttle ledger failed"); n != 1 {
+		t.Errorf("the ledger failure was logged %d times, want once; log:\n%s", n, h.logs)
+	}
+}
+
+// When writes fail but reads still work, the Ledger reads back too few sends.
+// Once it has failed at all, the Emailer must not trust it again.
+func TestLedgerWriteErrorStillThrottles(t *testing.T) {
+	h := newHarness(t)
+	h.ledger.writeErr = errors.New("disk full")
+
+	h.report("intake", "intake failing")
+	h.report("intake", "intake failing")
+	sent := h.mailer.sends()
+	if len(sent) != 1 {
+		t.Fatalf("an unrecorded send lifted the cooldown: %d emails, want 1", len(sent))
+	}
+	if !strings.Contains(sent[0].text, "disk full") {
+		t.Errorf("the email whose record failed should say so:\n%s", sent[0].text)
+	}
+
+	h.clock.Advance(15 * time.Minute)
+	h.report("intake", "intake failing")
+	sent = h.mailer.sends()
+	if len(sent) != 2 || !strings.Contains(sent[1].text, "1 more since the last alert") {
+		t.Fatalf("after the cooldown, want a 2nd email carrying 1 suppressed; got %d emails:\n%v", len(sent), sent)
+	}
+}
+
+// The in-memory copy starts from the Ledger's history, so a failure late in
+// the day doesn't reopen the daily cap.
+func TestLedgerFailureKeepsSendHistory(t *testing.T) {
+	h := newHarness(t)
+	for i := range 19 {
+		h.report(fmt.Sprintf("cat-%02d", i), "failure")
+		h.clock.Advance(10 * time.Minute)
+	}
+
+	h.ledger.readErr = errors.New("database is locked")
+	h.report("cat-19", "failure 19")
+	h.report("cat-20", "failure 20")
+
+	sent := h.mailer.sends()
+	if len(sent) != 20 {
+		t.Fatalf("after the ledger failed, %d emails in total, want 20", len(sent))
+	}
+	if !strings.Contains(sent[19].subject, capNotice) {
+		t.Errorf("the 20th send should still be the cap notice: %q", sent[19].subject)
 	}
 }
 

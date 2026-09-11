@@ -50,7 +50,8 @@ type fakeLedger struct {
 	lastSent   map[string]time.Time
 	suppressed map[string]int
 	sent       []time.Time // every recorded send, oldest first
-	err        error       // when set, every method fails with it
+	readErr    error       // when set, LastAlert and AlertSendsSince fail with it
+	writeErr   error       // when set, the Record methods fail with it
 }
 
 func newFakeLedger() *fakeLedger {
@@ -60,8 +61,8 @@ func newFakeLedger() *fakeLedger {
 func (l *fakeLedger) LastAlert(category string) (time.Time, int, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	if l.err != nil {
-		return time.Time{}, 0, l.err
+	if l.readErr != nil {
+		return time.Time{}, 0, l.readErr
 	}
 	return l.lastSent[category], l.suppressed[category], nil
 }
@@ -69,8 +70,8 @@ func (l *fakeLedger) LastAlert(category string) (time.Time, int, error) {
 func (l *fakeLedger) RecordAlertSent(category string, at time.Time) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	if l.err != nil {
-		return l.err
+	if l.writeErr != nil {
+		return l.writeErr
 	}
 	l.lastSent[category] = at
 	l.suppressed[category] = 0
@@ -81,8 +82,8 @@ func (l *fakeLedger) RecordAlertSent(category string, at time.Time) error {
 func (l *fakeLedger) RecordAlertSuppressed(category string) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	if l.err != nil {
-		return l.err
+	if l.writeErr != nil {
+		return l.writeErr
 	}
 	l.suppressed[category]++
 	return nil
@@ -91,8 +92,8 @@ func (l *fakeLedger) RecordAlertSuppressed(category string) error {
 func (l *fakeLedger) AlertSendsSince(t time.Time) ([]time.Time, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	if l.err != nil {
-		return nil, l.err
+	if l.readErr != nil {
+		return nil, l.readErr
 	}
 	var out []time.Time
 	for _, at := range l.sent {
