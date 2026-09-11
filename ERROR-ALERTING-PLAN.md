@@ -1,7 +1,7 @@
 # FileMill Error Alerting — Implementation Plan (issue #7)
 
-**Status:** Phase 1 (`internal/alert` core and the store `Ledger`) implemented
-2026-09-11; phases 2–5 not started. First drafted 2026-07-19; **revised
+**Status:** Phase 1 (`internal/alert` core and the store `Ledger`) and phase 2
+(job taxonomy split) implemented 2026-09-11; phases 3–5 not started. First drafted 2026-07-19; **revised
 2026-09-11** against the current code. Since the first draft, FileMill gained the
 supervisor loop (#4), boot start, the two retention sweeps, sheets-link delivery,
 and non-blocking delivery. Each adds alert sites, and the supervisor changes how a
@@ -65,7 +65,12 @@ the contract:
 
 - `result.json` valid and `success:false` → handled. No alert, whatever the exit code.
 - `result.json` valid, `success:true`, but nonzero exit → systemic (the result contradicts the exit code).
-- Anything else that fails (timeout, missing/invalid result, missing transformer) → systemic.
+- Anything else that fails (timeout, missing/invalid result, missing transformer,
+  a command that won't start) → systemic.
+- Killed because the worker itself is shutting down (Ctrl+C, a failed webhook
+  listener: the job's context is cancelled) → not the transformer's failure, so
+  no alert. Otherwise every restart that lands mid-job would read as a crash.
+  The job is still marked failed, as before.
 
 ---
 
