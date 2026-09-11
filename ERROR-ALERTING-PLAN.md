@@ -296,6 +296,8 @@ during shutdown still goes out.
 
 **Phase 5 — live verification.**
 - Set the real `alert_recipient` in the gitignored `config/email.yaml`.
+- Send one test alert with `filemill alert-test` (it goes straight to the Mailer,
+  past the throttle, but counts toward the daily cap), and check its spam placement.
 - Trigger one alert per sink: a transformer that exits 1 with no result, a bad
   Mailgun domain for delivery, and a restart.
 - Confirm the throttle by forcing a repeated failure for 20 minutes and expecting
