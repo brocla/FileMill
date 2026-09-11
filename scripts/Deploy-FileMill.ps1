@@ -77,7 +77,9 @@ function Wait-Until {
     $deadline = (Get-Date).AddSeconds($Seconds)
     while ((Get-Date) -lt $deadline) {
         if (& $Condition) { return $true }
-        Start-Sleep -Milliseconds 500
+        # A second between polls: these conditions query Win32_Process, which
+        # starts failing when it is asked several times a second.
+        Start-Sleep -Seconds 1
     }
     return $false
 }
@@ -87,10 +89,23 @@ function Wait-Until {
 # harness's fake) out of it.
 function Get-Workers {
     param([string]$Path)
-    # Not $matches: that is a PowerShell automatic variable, written by -match.
-    $found = Get-CimInstance Win32_Process -Filter "Name='filemill.exe'" -ErrorAction SilentlyContinue |
-        Where-Object { $_.ExecutablePath -and ($_.ExecutablePath -ieq $Path) }
-    return @($found)
+    # Win32_Process fails transiently when it is queried several times a
+    # second, and treating that as "no worker" would be dangerous here: it
+    # reads as the worker having vanished, which rolls a healthy deploy back.
+    # So retry, and say so rather than silently reporting nothing.
+    for ($attempt = 1; $attempt -le 4; $attempt++) {
+        try {
+            # Not $matches: that is a PowerShell automatic variable, written by -match.
+            $found = Get-CimInstance Win32_Process -Filter "Name='filemill.exe'" -ErrorAction Stop |
+                Where-Object { $_.ExecutablePath -and ($_.ExecutablePath -ieq $Path) }
+            return @($found)
+        } catch {
+            $lastError = $_.Exception.Message
+            Start-Sleep -Milliseconds 250
+        }
+    }
+    Write-Host "  (could not read the process list: $lastError)" -ForegroundColor Yellow
+    return @()
 }
 
 # Get-Version runs a binary's --version. It is also the proof that the file is
@@ -158,7 +173,11 @@ if (-not $SkipBuild) {
         $dirty = git status --porcelain
         if ($LASTEXITCODE -ne 0) { Fail 'git status failed; is this a checkout?' }
         if ($dirty -and -not $AllowDirty) {
-            Fail "The working tree has uncommitted changes, so the build would not match any commit. Commit them, or pass -AllowDirty.`n$($dirty -join "`n")"
+            # Concatenated, not interpolated: Windows PowerShell 5.1 cannot
+            # parse a double-quoted string inside $() inside another one, and
+            # this script is run by hand in an elevated 5.1 shell.
+            $changed = $dirty -join [Environment]::NewLine
+            Fail ('The working tree has uncommitted changes, so the build would not match any commit. Commit them, or pass -AllowDirty.' + [Environment]::NewLine + $changed)
         }
         if (-not $SkipTests) {
             Write-Step 'Running go test ./...'
@@ -179,10 +198,16 @@ $NewBinary = (Resolve-Path -LiteralPath $NewBinary).Path
 $newVersion = Get-Version $NewBinary
 if (-not $newVersion) { Fail "The new build at $NewBinary did not report a version, so it is not a working executable." }
 
-$workers = Get-Workers $binary
+# @() around every Get-Workers call: PowerShell unwraps a one-element array on
+# return, and asking a lone CimInstance for .Count gets $null in Windows
+# PowerShell 5.1, which reads as "no worker running" - here that would mean
+# swapping the binary and never restarting the worker.
+$workers = @(Get-Workers $binary)
+$runningPids = 'none'
+if ($workers.Count -gt 0) { $runningPids = ($workers | ForEach-Object { $_.ProcessId }) -join ', ' }
 Write-Host ''
 Write-Host "  repository: $RepositoryRoot"
-Write-Host "  running:    $oldVersion  (worker PID(s): $(if ($workers.Count) { ($workers | ForEach-Object { $_.ProcessId }) -join ', ' } else { 'none' }))"
+Write-Host "  running:    $oldVersion  (worker PID(s): $runningPids)"
 Write-Host "  deploying:  $newVersion"
 Write-Host ''
 
@@ -222,13 +247,13 @@ function Restore-Previous {
         Stop-Process -Id $worker.ProcessId -Force -ErrorAction SilentlyContinue
     }
     $back = Wait-Until -Seconds $TimeoutSeconds -Condition {
-        $running = Get-Workers $binary
+        $running = @(Get-Workers $binary)
         ($running.Count -gt 0) -and ((Get-Version $binary) -eq $oldVersion)
     }
     if ($back) {
         Fail "$Reason. Rolled back to $oldVersion; the build that failed is at $failed."
     }
-    Fail "$Reason. Rolled back to $oldVersion, but no worker came back — start it with: Start-ScheduledTask -TaskName 'FileMill Worker'. The build that failed is at $failed."
+    Fail "$Reason. Rolled back to $oldVersion, but no worker came back - start it with: Start-ScheduledTask -TaskName 'FileMill Worker'. The build that failed is at $failed."
 }
 
 # --- restart: kill the worker and let the supervisor relaunch it ------------
@@ -242,22 +267,23 @@ if ($workers.Count -eq 0) {
 
 $logOffset = Get-LogLength $logPath
 $oldPids = @($workers | ForEach-Object { $_.ProcessId })
-Write-Step "Stopping the worker (PID $($oldPids -join ', ')); the supervisor will relaunch it"
+$oldPidList = $oldPids -join ', '
+Write-Step "Stopping the worker (PID $oldPidList); the supervisor will relaunch it"
 foreach ($worker in $workers) {
     Stop-Process -Id $worker.ProcessId -Force
 }
-if (-not (Wait-Until -Seconds $TimeoutSeconds -Condition { (Get-Workers $binary | Where-Object { $oldPids -contains $_.ProcessId }).Count -eq 0 })) {
+if (-not (Wait-Until -Seconds $TimeoutSeconds -Condition { @(Get-Workers $binary | Where-Object { $oldPids -contains $_.ProcessId }).Count -eq 0 })) {
     Restore-Previous 'The old worker did not stop'
 }
 
 Write-Step 'Waiting for the supervisor to start the new worker'
-if (-not (Wait-Until -Seconds $TimeoutSeconds -Condition { (Get-Workers $binary | Where-Object { $oldPids -notcontains $_.ProcessId }).Count -gt 0 })) {
+if (-not (Wait-Until -Seconds $TimeoutSeconds -Condition { @(Get-Workers $binary | Where-Object { $oldPids -notcontains $_.ProcessId }).Count -gt 0 })) {
     # Two causes look identical from here, and a build that crashes at startup
     # can exit before it is ever seen in the process list, so name both rather
     # than guessing: the log tail printed below usually settles it.
     Restore-Previous 'No new worker stayed up. Either the new build exits at startup, or no supervisor is running to relaunch it (Start-ScheduledTask -TaskName ''FileMill Worker'')'
 }
-$newWorkers = Get-Workers $binary | Where-Object { $oldPids -notcontains $_.ProcessId }
+$newWorkers = @(Get-Workers $binary | Where-Object { $oldPids -notcontains $_.ProcessId })
 
 # --- verify: the new version is the one serving -----------------------------
 
@@ -270,13 +296,14 @@ if (-not $SkipLogCheck) {
 
 # A worker that started and then died leaves a PID that no longer exists, so
 # this is checked after the log line, not instead of it.
-if ((Get-Workers $binary).Count -eq 0) {
+if (@(Get-Workers $binary).Count -eq 0) {
     Restore-Previous 'The new worker started and then exited'
 }
 
 Write-Host ''
 Write-Host "Deployed $oldVersion -> $newVersion" -ForegroundColor Green
-Write-Host "  worker PID(s): $(($newWorkers | ForEach-Object { $_.ProcessId }) -join ', ')"
+$newPidList = ($newWorkers | ForEach-Object { $_.ProcessId }) -join ', '
+Write-Host "  worker PID(s): $newPidList"
 Write-Host "  previous binary kept at: $backup"
 $startup = (Read-LogSince $logPath $logOffset) -split "`r?`n" | Where-Object { $_ -match [regex]::Escape($newVersion) } | Select-Object -First 1
 if ($startup) { Write-Host "  $($startup.Trim())" }

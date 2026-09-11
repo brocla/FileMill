@@ -6,7 +6,7 @@
 .DESCRIPTION
     Sets up a throwaway "repository": a bin\ holding a stub worker, a
     data\logs\ for it to write to, and a stub supervisor that relaunches the
-    worker whenever it exits — the same shape as the real install, with none of
+    worker whenever it exits - the same shape as the real install, with none of
     its parts. The stub worker is a tiny Go program built three times with
     different stamped versions, one of which fails to start on purpose.
 
@@ -21,6 +21,13 @@
 
     It needs no elevation (the stub worker runs in this session) and no modules.
     Exits 0 if every check passes, 1 otherwise.
+
+    Run it under BOTH shells - powershell.exe (5.1, which is what an elevated
+    window gives you, and what the deploy is run in) and pwsh.exe (7). They
+    differ in ways that decide whether the deploy works at all: 5.1 reads a
+    BOM-less file as ANSI, and it returns $null for .Count on a single
+    CimInstance that PowerShell unwrapped out of an array. Both of those
+    shipped in this script's first version and only 5.1 showed them.
 #>
 [CmdletBinding()]
 param(
@@ -33,7 +40,10 @@ $ErrorActionPreference = 'Stop'
 
 $script:failures = @()
 function Check {
-    param([string]$What, [bool]$Ok, [string]$Detail)
+    # $Ok is deliberately untyped: a [bool] parameter throws when a helper
+    # accidentally returns a collection, which hides the real failure behind a
+    # binding error.
+    param([string]$What, $Ok, [string]$Detail)
     if ($Ok) {
         Write-Host "  ok   $What" -ForegroundColor Green
     } else {
@@ -43,24 +53,130 @@ function Check {
     }
 }
 
+$script:polls = 0
+$script:lastPollValue = '(never evaluated)'
+
 function Wait-Until {
     param([scriptblock]$Condition, [int]$Seconds = 30)
+    $script:polls = 0
     $deadline = (Get-Date).AddSeconds($Seconds)
     while ((Get-Date) -lt $deadline) {
-        if (& $Condition) { return $true }
-        Start-Sleep -Milliseconds 200
+        $script:polls++
+        # Kept as a value rather than tested inline, so a wait that gives up can
+        # report what it was actually seeing instead of only that it failed.
+        $value = & $Condition
+        $script:lastPollValue = "[$value]"
+        if ($value) { return $true }
+        # 750ms, not 200: these conditions query Win32_Process, which starts
+        # failing when it is asked several times a second.
+        Start-Sleep -Milliseconds 750
     }
     return $false
 }
 
+$script:lastQueryError = $null
+
 function Get-FakeWorkers {
     param([string]$Path)
-    return @(Get-CimInstance Win32_Process -Filter "Name='filemill.exe'" -ErrorAction SilentlyContinue |
-        Where-Object { $_.ExecutablePath -and ($_.ExecutablePath -ieq $Path) })
+    # Records what it saw on the way through: a wait that gives up has to be
+    # able to say whether the query failed, matched nothing, or was handed the
+    # wrong path.
+    $script:lastQueryPath = $Path
+    for ($attempt = 1; $attempt -le 4; $attempt++) {
+        try {
+            $all = @(Get-CimInstance Win32_Process -Filter "Name='filemill.exe'" -ErrorAction Stop)
+            $found = @($all | Where-Object { $_.ExecutablePath -and ($_.ExecutablePath -ieq $Path) })
+            $script:lastQueryError = $null
+            $script:lastQueryCounts = "unfiltered=$($all.Count) filtered=$($found.Count)"
+            return $found
+        } catch {
+            $script:lastQueryError = $_.Exception.Message
+            Start-Sleep -Milliseconds 250
+        }
+    }
+    return @()
+}
+
+# Show-WorkerState prints what the process list actually held when a wait gave
+# up. A bare "never started" says nothing about whether the process was missing,
+# somewhere else, or simply unreadable from this shell.
+function Show-WorkerState {
+    param([string]$Path)
+    Write-Host "  expected worker path: [$Path]"
+    Write-Host "  polls made: $script:polls, last condition value: $script:lastPollValue"
+    Write-Host "  last query path: [$script:lastQueryPath]"
+    Write-Host "  last query counts: $script:lastQueryCounts"
+    if ($script:lastQueryError) { Write-Host "  last process-query error: $script:lastQueryError" }
+    $all = @(Get-CimInstance Win32_Process -Filter "Name='filemill.exe'" -ErrorAction SilentlyContinue)
+    Write-Host "  filemill.exe processes visible: $($all.Count)"
+    foreach ($process in $all) {
+        Write-Host ("    pid={0} path=[{1}]" -f $process.ProcessId, $process.ExecutablePath)
+    }
 }
 
 $deployScript = Join-Path $PSScriptRoot 'Deploy-FileMill.ps1'
 if (-not (Test-Path -LiteralPath $deployScript)) { throw "Deploy-FileMill.ps1 not found next to this script." }
+
+# Test-Parses asks one PowerShell to parse a script and report syntax errors.
+# The path travels in an environment variable so the command needs no quoting
+# of its own.
+function Test-Parses {
+    param([string]$Shell, [string]$Path)
+    $env:FILEMILL_PARSE_TARGET = $Path
+    $code = '$e = $null; [void][System.Management.Automation.Language.Parser]::ParseFile($env:FILEMILL_PARSE_TARGET, [ref]$null, [ref]$e); if ($e) { $e | ForEach-Object { "line {0}: {1}" -f $_.Extent.StartLineNumber, $_.Message }; exit 1 }; exit 0'
+    # Capture the child's output instead of letting it join this function's
+    # return value, which would make the result an array rather than a boolean.
+    $output = & $Shell -NoProfile -Command $code 2>&1
+    $parsed = ($LASTEXITCODE -eq 0)
+    if (-not $parsed) {
+        $output | ForEach-Object { Write-Host "       $_" }
+    }
+    return $parsed
+}
+
+# These scripts are run by hand in an elevated Windows PowerShell, which is 5.1
+# and parses more strictly than pwsh 7 - it rejects a double-quoted string
+# inside $() inside another one, for instance. A harness that only ever ran
+# under pwsh once let exactly that reach the operator, so both shells parse
+# both scripts before anything else happens.
+Write-Host 'Parsing the scripts in each installed PowerShell'
+foreach ($shell in @('powershell.exe', 'pwsh.exe')) {
+    if (-not (Get-Command $shell -ErrorAction SilentlyContinue)) {
+        Write-Host "  skip $shell (not installed)"
+        continue
+    }
+    foreach ($target in @($deployScript, $PSCommandPath)) {
+        Check "$([System.IO.Path]::GetFileName($target)) parses in $shell" (Test-Parses $shell $target)
+    }
+}
+# Windows PowerShell 5.1 reads a .ps1 with no byte-order mark as ANSI rather
+# than UTF-8, so a character like an em dash arrives as three characters, one of
+# which is a smart quote - and PowerShell accepts smart quotes as string
+# delimiters. In a comment that is only mojibake. In a string it opens a string
+# that never closes and the file stops parsing, which is exactly how a broken
+# deploy script reached the operator once. Keeping these scripts ASCII-only
+# sidesteps the encoding question rather than relying on remembering it.
+Write-Host 'Checking the scripts are ASCII-only'
+foreach ($script in (Get-ChildItem -LiteralPath $PSScriptRoot -Filter '*.ps1')) {
+    $offenders = @()
+    $number = 0
+    foreach ($line in (Get-Content -LiteralPath $script.FullName -Encoding UTF8)) {
+        $number++
+        foreach ($char in $line.ToCharArray()) {
+            if ([int]$char -gt 127) {
+                $offenders += ('line {0}: U+{1:X4}' -f $number, [int]$char)
+                break
+            }
+        }
+    }
+    Check "$($script.Name) is ASCII-only" ($offenders.Count -eq 0) ($offenders -join '; ')
+}
+
+if ($script:failures.Count -gt 0) {
+    Write-Host ''
+    Write-Host 'Fix the syntax or encoding problems above; not running the deploy cases.' -ForegroundColor Red
+    exit 1
+}
 
 if (-not $WorkRoot) { $WorkRoot = Join-Path $env:TEMP ("filemill-deploy-test-" + [guid]::NewGuid().ToString('N').Substring(0, 8)) }
 $binDir = Join-Path $WorkRoot 'bin'
@@ -147,9 +263,13 @@ $supervisor = Start-Process -FilePath 'powershell.exe' `
     -PassThru -WindowStyle Hidden
 
 try {
-    if (-not (Wait-Until { (Get-FakeWorkers $binary).Count -gt 0 })) { throw 'the stub worker never started' }
-    if (-not (Wait-Until { (Test-Path $logPath) -and ((Get-Content $logPath -Raw) -match 'v-old') })) { throw 'the stub worker never logged' }
-    $originalPid = (Get-FakeWorkers $binary)[0].ProcessId
+    # @() around every call: PowerShell unwraps a one-element array on return,
+    # and asking a lone CimInstance for .Count gets $null in Windows PowerShell
+    # 5.1 (it looks for a CIM property by that name), so an unwrapped count
+    # silently reads as "nothing running".
+    if (-not (Wait-Until { @(Get-FakeWorkers $binary).Count -gt 0 })) { Show-WorkerState $binary; throw 'the stub worker never started' }
+    if (-not (Wait-Until { (Test-Path $logPath) -and ((Get-Content $logPath -Raw) -match 'v-old') })) { Show-WorkerState $binary; throw 'the stub worker never logged' }
+    $originalPid = @(Get-FakeWorkers $binary)[0].ProcessId
 
     Write-Host ''
     Write-Host 'Case 1: a good build deploys and the worker comes back on it'
@@ -159,12 +279,12 @@ try {
     Check 'deploy exits 0' ($exit -eq 0) "exit code $exit"
     Check 'bin\filemill.exe is now the new build' ((& $binary --version) -match 'v-new')
     Check 'the previous binary was kept' (Test-Path (Join-Path $binDir 'filemill.v-old.exe'))
-    Check 'the worker was restarted' (Wait-Until { $running = Get-FakeWorkers $binary; ($running.Count -gt 0) -and ($running[0].ProcessId -ne $originalPid) })
+    Check 'the worker was restarted' (Wait-Until { $running = @(Get-FakeWorkers $binary); ($running.Count -gt 0) -and ($running[0].ProcessId -ne $originalPid) })
     Check 'the new version reached the log' ((Get-Content $logPath -Raw) -match 'FileMill v-new')
 
     Write-Host ''
     Write-Host 'Case 2: a build that will not start is rolled back'
-    $beforePid = (Get-FakeWorkers $binary)[0].ProcessId
+    $beforePid = @(Get-FakeWorkers $binary)[0].ProcessId
     # 6>&1 captures Write-Host output (the information stream), so the failure
     # report itself can be checked: a rolled-back deploy has to say why.
     $output = & $deployScript -RepositoryRoot $WorkRoot -NewBinary (Join-Path $stage 'filemill.bad.exe') `
@@ -174,7 +294,7 @@ try {
     Check 'the failure report shows what the worker logged' ($output -match 'startup failed') $output
     Check 'bin\filemill.exe is back to the previous build' ((& $binary --version) -match 'v-new')
     Check 'the build that failed was kept for inspection' (Test-Path (Join-Path $binDir 'filemill.failed.exe'))
-    Check 'a worker is serving again' (Wait-Until { $running = Get-FakeWorkers $binary; ($running.Count -gt 0) -and ($running[0].ProcessId -ne $beforePid) })
+    Check 'a worker is serving again' (Wait-Until { $running = @(Get-FakeWorkers $binary); ($running.Count -gt 0) -and ($running[0].ProcessId -ne $beforePid) })
     Check 'it is the previous version' (Wait-Until { ((Get-Content $logPath -Raw) -split "`r?`n" | Where-Object { $_ -match 'FileMill v-new' }).Count -ge 2 })
 } finally {
     Stop-Process -Id $supervisor.Id -Force -ErrorAction SilentlyContinue
