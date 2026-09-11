@@ -1,9 +1,14 @@
 # FileMill Error Alerting — Implementation Plan (issue #7)
 
-**Status:** Phases 1–4 implemented 2026-09-11: the `internal/alert` core and
-store `Ledger`, the job taxonomy split, the Mailgun alert sites with their
-wiring, and crash reporting across restarts. Phase 4's manual kill test and
-phase 5's live verification are still to do. First drafted 2026-07-19; **revised
+**Status:** Implemented and verified in production 2026-09-11. Phases 1–4 are
+built (the `internal/alert` core and store `Ledger`, the job taxonomy split, the
+Mailgun alert sites and wiring, crash reporting across restarts), and phase 5's
+live checks passed against a branch build (`v0.2.1-20-g0aa8f96`): the test send,
+one `restart` email from a killed worker with four further restarts suppressed,
+one `job-systemic` email from the `alert_probe` transformer, and a second one
+15 minutes later carrying "14 more". Only the bad-Mailgun-domain check is
+outstanding, and it is deliberately skipped: it delays real senders' replies,
+and the send path is covered by tests and by the four alerts above. First drafted 2026-07-19; **revised
 2026-09-11** against the current code. Since the first draft, FileMill gained the
 supervisor loop (#4), boot start, the two retention sweeps, sheets-link delivery,
 and non-blocking delivery. Each adds alert sites, and the supervisor changes how a
@@ -307,6 +312,13 @@ during shutdown still goes out.
   Mailgun domain for delivery, and a restart.
 - Confirm the throttle by forcing a repeated failure for 20 minutes and expecting
   two emails, the second carrying a suppressed count.
+
+**Verified 2026-09-11** with an `alert_probe` transformer (`cmd /c exit 1`, no
+`result.json`, in the gitignored `transformers.yaml`, reachable by no route):
+21 submissions a minute apart produced 21 failed jobs, 2 emails and 19
+suppressions, the second email carrying "14 more since the last alert in this
+category". Killing the worker produced exactly one `restart` email; four more
+kills inside the cooldown were logged and suppressed.
 
 **Estimate:** about 3 days. Phase 1 (the throttle and persistence) is the bulk.
 Phases 2 and 3 are about 1 day together. Phase 4 is half a day.
