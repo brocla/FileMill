@@ -110,8 +110,9 @@ type Mailer interface {
 // Ledger is the persisted throttle state. *store.Store satisfies it.
 type Ledger interface {
     LastAlert(category string) (sentAt time.Time, suppressed int, err error) // zero sentAt: never sent
-    RecordAlertSent(category string, at time.Time) error // resets suppressed
+    RecordAlertSent(category string, at time.Time) error // for the caps; leaves suppressed alone
     RecordAlertSuppressed(category string) error         // suppressed++
+    ClearSuppressed(category string) error               // after an email carrying the count went out
     AlertSendsSince(t time.Time) ([]time.Time, error)    // sends after t, oldest first
 }
 
@@ -248,7 +249,10 @@ app.Open → mailgun.Load → if alert_recipient set:
     report restart / interrupted jobs (§3.6)
 ```
 
-`--once` mode and a Mailgun-less configuration keep `Nop`. `emailer.Run` should
+`--once` mode and a Mailgun-less configuration keep `Nop`. Marking interrupted
+jobs and reporting `restart` are continuous-mode only, for a related reason:
+`--once` binds no port, so it cannot tell whether the real worker is mid-job,
+and `run --once` alongside it would mark that worker's live job `interrupted`. `emailer.Run` should
 drain the queue on shutdown within the existing 10s window, so an alert raised
 during shutdown still goes out.
 
