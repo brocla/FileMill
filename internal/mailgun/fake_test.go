@@ -37,6 +37,8 @@ type fakeEngine struct {
 	jobs      map[int64]map[int]string // sid -> attachment index -> job id
 	expected  map[int64]int
 	delivered map[int64]bool
+	markErr   error // when set, MarkEmailDelivered fails with it
+	markCalls int   // MarkEmailDelivered attempts, failed ones included
 
 	submitCount     int
 	sources         []string // source paths passed to Submit, in order
@@ -149,6 +151,10 @@ func (f *fakeEngine) AddEmailJob(id int64, index int, jobID string) error {
 func (f *fakeEngine) PendingEmails() ([]store.EmailSubmission, error) { return f.pending, nil }
 
 func (f *fakeEngine) MarkEmailDelivered(id int64) error {
+	f.markCalls++
+	if f.markErr != nil {
+		return f.markErr
+	}
 	f.delivered[id] = true
 	return nil
 }

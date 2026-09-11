@@ -95,6 +95,11 @@ type Service struct {
 	sendBase string       // Mailgun Send API base URL; overridable in tests
 	client   *http.Client // outbound HTTP client (carries the send timeout)
 	log      *log.Logger
+
+	// sentUnmarked holds submissions whose reply Mailgun accepted but whose
+	// delivered mark failed, so the delivery loop retries only the mark (see
+	// markDelivered). Only the delivery goroutine touches it; nil until needed.
+	sentUnmarked map[int64]bool
 }
 
 // Handler returns the webhook HTTP handler. It is mounted by cmd/filemill run

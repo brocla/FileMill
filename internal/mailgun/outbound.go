@@ -83,7 +83,23 @@ func finished(sub store.EmailSubmission) bool {
 // Mailgun accepts the reply, so a transient send failure is retried on the next
 // tick; under sheets-link delivery the upload is already recorded by then and
 // is not repeated.
+//
+// Delivery is therefore at-least-once (#6), and two windows can still send a
+// reply twice: a crash between Mailgun accepting the reply and the mark, and a
+// send that times out on our side after Mailgun accepted it. Each costs one
+// duplicate, sent after the restart or on the next tick. That is accepted: a
+// duplicate reply is harmless, and closing the window would take either a
+// "delivering" state, which only trades a rare duplicate for a rare lost
+// reply, or a provider-side idempotency key.
+//
+// A mark that fails while the process runs is not accepted: the submission
+// stays pending and would be re-sent on every tick. markDelivered remembers
+// it, so later ticks retry the mark alone. That memory dies with the process,
+// so each restart before the mark succeeds sends one more duplicate.
 func (s *Service) deliver(ctx context.Context, sub store.EmailSubmission) error {
+	if s.sentUnmarked[sub.ID] {
+		return s.markDelivered(sub.ID)
+	}
 	var lines []string
 	var outputs []app.OutputFile
 	var labels []string
@@ -123,7 +139,23 @@ func (s *Service) deliver(ctx context.Context, sub store.EmailSubmission) error 
 	if err := s.send(ctx, sub.Sender, sub.Subject, threadingID(sub.MessageID), text, attachments); err != nil {
 		return err
 	}
-	return s.engine.MarkEmailDelivered(sub.ID)
+	return s.markDelivered(sub.ID)
+}
+
+// markDelivered records a sent reply as delivered. On failure it remembers the
+// submission, so deliver retries only the mark and never the send: re-sending
+// on every 1-second tick would flood the sender with duplicates and spend the
+// Mailgun Free plan's 100 sends a day in under two minutes.
+func (s *Service) markDelivered(id int64) error {
+	if err := s.engine.MarkEmailDelivered(id); err != nil {
+		if s.sentUnmarked == nil {
+			s.sentUnmarked = map[int64]bool{}
+		}
+		s.sentUnmarked[id] = true
+		return fmt.Errorf("reply sent, but marking it delivered failed (retrying the mark only): %w", err)
+	}
+	delete(s.sentUnmarked, id)
+	return nil
 }
 
 // deliveryMode returns how replies to a recipient address are delivered.

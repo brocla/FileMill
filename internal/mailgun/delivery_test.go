@@ -228,6 +228,50 @@ func TestDeliverRetryAfterSendFailureDoesNotRepublish(t *testing.T) {
 	}
 }
 
+// Once Mailgun has accepted a reply, the send is done even if marking it
+// delivered fails. The submission stays pending, and sending again on every
+// tick would flood the sender with duplicates and spend the Mailgun Free
+// plan's 100 sends a day in under two minutes. Only the mark is retried.
+func TestDeliverRetriesOnlyTheMarkAfterASuccessfulSend(t *testing.T) {
+	f := newDeliveryFixture(t)
+	f.addSubmission(t, 1, "iwk@mill.test", "schedule.xlsx")
+	f.engine.markErr = fmt.Errorf("disk I/O error")
+
+	for range 3 {
+		if err := f.service.deliverPending(context.Background()); err != nil {
+			t.Fatalf("a failed mark must be skipped, not returned: %v", err)
+		}
+	}
+	if len(f.mailgun.sent) != 1 {
+		t.Fatalf("a reply Mailgun accepted was sent %d times, want 1", len(f.mailgun.sent))
+	}
+	if len(f.publisher.published) != 1 {
+		t.Fatalf("retrying the mark re-published: %d uploads, want 1", len(f.publisher.published))
+	}
+	if f.engine.markCalls != 3 {
+		t.Errorf("mark attempts = %d, want one per tick", f.engine.markCalls)
+	}
+	if f.engine.delivered[1] {
+		t.Fatal("submission marked delivered while the mark was failing")
+	}
+	if !strings.Contains(f.logs.String(), "disk I/O error") {
+		t.Errorf("the failed mark must be logged; got %q", f.logs.String())
+	}
+
+	// The database recovers; the next tick records the delivery, still
+	// without sending again.
+	f.engine.markErr = nil
+	if err := f.service.deliverPending(context.Background()); err != nil {
+		t.Fatalf("recovery tick: %v", err)
+	}
+	if !f.engine.delivered[1] {
+		t.Error("submission must be marked delivered once the mark succeeds")
+	}
+	if len(f.mailgun.sent) != 1 {
+		t.Errorf("recovery sent the reply again: %d sends, want 1", len(f.mailgun.sent))
+	}
+}
+
 // Idempotency is per output file, not per submission — which is why the record
 // is keyed on both. A job declaring two outputs that fails partway must resume
 // where it stopped: the file already in Drive is reused, only the missing one
