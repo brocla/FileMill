@@ -67,6 +67,30 @@ func main() {
 			fatal(err)
 		}
 		fmt.Printf("id: %s\noperation: %s\nstatus: %s\nmessage: %s\n", job.ID, job.Operation, job.Status, job.Message)
+	case "alert-test":
+		// Sends one alert to alert_recipient, so the channel is proven (and
+		// its spam placement known) before anything relies on it.
+		if len(os.Args) != 2 {
+			usage()
+			os.Exit(2)
+		}
+		mail, err := mailgun.Load(root, application, log.New(os.Stderr, "mailgun ", log.LstdFlags|log.LUTC))
+		if err != nil {
+			fatal(err)
+		}
+		if mail == nil {
+			fatal(fmt.Errorf("alert-test sends through Mailgun: set MAILGUN_API_KEY, MAILGUN_WEBHOOK_SIGNING_KEY, MAILGUN_DOMAIN, and REPLY_FROM"))
+		}
+		to := mail.AlertRecipient()
+		if to == "" {
+			fatal(fmt.Errorf("no alert_recipient in config/email.yaml"))
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+		defer cancel()
+		if err := alert.SendTest(ctx, mail, application, to, time.Now()); err != nil {
+			fatal(err)
+		}
+		fmt.Printf("test alert sent to %s; check that it arrives and isn't marked as spam\n", to)
 	case "run":
 		once := len(os.Args) == 3 && os.Args[2] == "--once"
 		if len(os.Args) > 2 && !once {
@@ -185,7 +209,7 @@ func main() {
 
 func usage() {
 	name := filepath.Base(os.Args[0])
-	fmt.Fprintf(os.Stderr, "Usage:\n  %s run [--once]\n  %s submit <operation> <file>\n  %s jobs get <job-id>\n  %s --version\n", name, name, name, name)
+	fmt.Fprintf(os.Stderr, "Usage:\n  %s run [--once]\n  %s submit <operation> <file>\n  %s jobs get <job-id>\n  %s alert-test\n  %s --version\n", name, name, name, name, name)
 }
 
 func fatal(err error) { fmt.Fprintln(os.Stderr, "filemill:", err); os.Exit(1) }

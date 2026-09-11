@@ -30,6 +30,7 @@ send_timeout_seconds: 30
 # Operator alerts. Systemic failures (a crashed or timed-out transformer, replies
 # failing for 5 minutes, intake errors, retention sweeps that can't delete) are
 # emailed to this address, from REPLY_FROM. Empty or absent turns them off.
+# Check the channel once with `filemill alert-test`, which sends one test alert.
 #
 # Alerts are throttled: one per category every alert_cooldown_minutes (the next
 # email counts the ones held back), and at most alert_max_per_hour and
