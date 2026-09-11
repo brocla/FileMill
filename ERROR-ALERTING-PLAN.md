@@ -109,9 +109,16 @@ func (e *Emailer) Run(ctx context.Context) // started by main; drains the queue
 - `Report` does a non-blocking send on a buffered channel (e.g. 64). If the buffer
   is full, it logs and drops the alert. A flood that fills it would be throttled
   anyway.
-- The throttle is **per-category cooldown** (default 15 min), plus a **global cap**
-  (default 10 emails/hour). A suppressed alert increments the count, and the next
-  email for that category says "N more since the last alert".
+- The throttle is **per-category cooldown** (default 15 min), plus two **global
+  caps**: 10 emails/hour and **20 emails/day** (a rolling 24h window). A
+  suppressed alert increments the count, and the next email for that category
+  says "N more since the last alert".
+- **The daily cap is the binding one.** The Mailgun Free plan allows 100 sends a
+  day, *shared with replies*, and hard-rejects past that until the next day. The
+  hourly cap alone would allow 240/day, enough to lock out every reply to senders.
+  20/day keeps alerts to at most a fifth of the day's budget. When the daily cap
+  is hit, one last alert says so ("daily alert cap reached; further alerts are
+  logged only until <time>"); it counts within the 20, so the cap stays exact.
 - Clock, Mailer and Ledger are all injected, so the throttle is tested without
   sleeping, SQLite or the network.
 
@@ -125,8 +132,10 @@ CREATE TABLE IF NOT EXISTS alert_state (
 CREATE TABLE IF NOT EXISTS alert_sends (sent_at TEXT NOT NULL); -- pruned to 24h on write
 ```
 
-`alert_sends` exists only for the global cap. `alert_state` alone can't count sends
-per hour.
+`alert_sends` exists only for the global caps. `alert_state` alone can't count sends
+per hour or per day. Keeping 24h of rows covers both windows. Persisting matters
+most for the daily cap: a crash-looping worker that reset it on every restart
+could spend the whole Free-plan budget.
 
 ### 3.3 Mailgun changes
 
@@ -138,7 +147,8 @@ per hour.
 - `Service` gets a `reporter alert.Reporter` field that defaults to `alert.Nop{}`,
   plus `SetReporter`.
 - `fileConfig` gets `alert_recipient` (empty means disabled),
-  `alert_cooldown_minutes` and `alert_max_per_hour`.
+  `alert_cooldown_minutes`, `alert_max_per_hour` (default 10) and
+  `alert_max_per_day` (default 20).
 
 ### 3.4 App changes
 
@@ -208,7 +218,12 @@ during shutdown still goes out.
 - Tests:
   - N identical reports inside the cooldown → 1 email; the next email after the cooldown carries a suppressed count of N-1.
   - Different categories don't suppress each other.
-  - The global cap holds across categories.
+  - The hourly cap holds across categories.
+  - The daily cap holds across categories and across hours: the 21st alert in a
+    rolling 24h is suppressed even when the hourly cap would allow it. The 20th
+    is the "daily cap reached" notice. The cap reopens as the oldest send leaves
+    the window.
+  - The daily cap survives a restart (a new `Emailer` over the same ledger).
   - A failed send is logged, not retried or re-reported.
   - `Report` never blocks when the queue is full.
   - Throttle state survives a new `Emailer` built over the same ledger, simulating a restart.
@@ -259,8 +274,11 @@ Phases 2 and 3 are about 1 day together. Phase 4 is half a day.
 
 ## 5. Decisions (recommended defaults; change before Phase 3 if needed)
 
-1. **Throttle style:** per-category cooldown (15 min) with suppressed counts, plus a
-   global cap (10/hour). No digest emails.
+1. **Throttle style:** per-category cooldown (15 min) with suppressed counts, plus
+   global caps of 10/hour and **20/day**. No digest emails. The daily cap is
+   set by the Mailgun **Free plan** (100 sends/day shared with replies, hard
+   stop at the limit). Revisit it if the account moves to a paid plan, where
+   alert volume is a rounding error in the bill.
 2. **Transformer output in alerts:** include the last 2 KB. The recipient is the
    operator, who already holds the input files under `data/jobs/`, so this reveals
    nothing new to them. It is also the most useful diagnostic.
