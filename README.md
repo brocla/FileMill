@@ -175,6 +175,32 @@ The task also overrides two Task Scheduler defaults that are wrong for a
 laptop: without them Windows refuses to start the task on battery and stops
 it the moment you unplug.
 
+### Deploy a new build
+
+With the worker running under the supervisor, deploy from an **elevated**
+PowerShell:
+
+```powershell
+.\scripts\Deploy-FileMill.ps1
+```
+
+It builds and tests the current checkout, keeps the running binary as
+`bin\filemill.<old version>.exe`, moves the new one into place, and stops the
+worker — the supervisor relaunches it into the new build, so the downtime is a
+single restart and Task Scheduler is not involved. Nothing is taken on trust:
+the new binary has to report its version, a new worker has to appear, and the
+new version has to show up in `filemill.log`. If it doesn't, the previous
+binary goes back and the script exits non-zero.
+
+Elevation is required for the same reason as above: the worker runs in session
+0. Stopping it interrupts any job it is running — the restarted worker marks
+that job interrupted, and its sender's reply asks them to send the file again.
+
+`scripts\Test-DeployFileMill.ps1` exercises the deploy against a stub worker in
+a temporary directory (including a build that refuses to start, to prove the
+rollback), so the script can be changed without experimenting on the installed
+service.
+
 To remove the automatic start later (this also stops the running supervisor
 and worker):
 
