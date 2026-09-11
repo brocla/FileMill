@@ -31,7 +31,7 @@ $action = New-ScheduledTaskAction -Execute $powershell -Argument "-NoProfile -Ex
 # Two triggers. At boot is the one that matters: a machine that reboots
 # overnight for updates used to sit idle until someone signed in, with the
 # Cloudflare tunnel (a real service) up and nothing listening behind it. The
-# logon trigger stays as a backstop — MultipleInstances IgnoreNew makes a second
+# logon trigger stays as a backstop - MultipleInstances IgnoreNew makes a second
 # fire while the task is already running a no-op.
 #
 # The boot trigger waits 30 seconds. Nothing is waiting on FileMill at second
@@ -44,8 +44,8 @@ $atLogon = New-ScheduledTaskTrigger -AtLogOn -User $user
 # and without storing a password. It is what makes the boot trigger useful, and
 # it is also why this script needs elevation.
 #
-# It costs the task a network identity — an S4U process cannot reach SMB shares
-# as the user — which FileMill does not need: it makes outbound HTTPS calls
+# It costs the task a network identity - an S4U process cannot reach SMB shares
+# as the user - which FileMill does not need: it makes outbound HTTPS calls
 # authenticated by API keys and listens on a local port. Its secrets must be
 # machine-scope environment variables, though, because a task running before
 # logon has no user registry hive to read user-scope ones from.
