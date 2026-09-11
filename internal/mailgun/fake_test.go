@@ -37,6 +37,8 @@ type fakeEngine struct {
 	jobs      map[int64]map[int]string // sid -> attachment index -> job id
 	expected  map[int64]int
 	delivered map[int64]bool
+	markErr   error // when set, MarkEmailDelivered fails with it
+	markCalls int   // MarkEmailDelivered attempts, failed ones included
 
 	submitCount     int
 	sources         []string // source paths passed to Submit, in order
@@ -51,11 +53,13 @@ type fakeEngine struct {
 	calls []string // ordered log of mutating calls
 
 	pending    []store.EmailSubmission
+	panicWith  any // when set, PendingEmails and ExpiredDeliveries panic with it
 	outputs    map[string][]app.OutputFile
 	outputsErr map[string]error // job id -> error Outputs should return
 
 	deliveries      map[deliveryKey]store.Delivery
 	sweptDeliveries map[deliveryKey]bool
+	putDeliveryErr  error // when set, PutDelivery fails with it
 
 	// labels maps an operation to the report name a reply calls it by. An
 	// operation absent here falls back to its own name, as the real engine does.
@@ -146,9 +150,18 @@ func (f *fakeEngine) AddEmailJob(id int64, index int, jobID string) error {
 	return nil
 }
 
-func (f *fakeEngine) PendingEmails() ([]store.EmailSubmission, error) { return f.pending, nil }
+func (f *fakeEngine) PendingEmails() ([]store.EmailSubmission, error) {
+	if f.panicWith != nil {
+		panic(f.panicWith)
+	}
+	return f.pending, nil
+}
 
 func (f *fakeEngine) MarkEmailDelivered(id int64) error {
+	f.markCalls++
+	if f.markErr != nil {
+		return f.markErr
+	}
 	f.delivered[id] = true
 	return nil
 }
@@ -168,6 +181,9 @@ type deliveryKey struct {
 
 func (f *fakeEngine) PutDelivery(submissionID int64, outputIndex int, fileID, link string) error {
 	f.calls = append(f.calls, fmt.Sprintf("PutDelivery(%d,%d)", submissionID, outputIndex))
+	if f.putDeliveryErr != nil {
+		return f.putDeliveryErr
+	}
 	key := deliveryKey{submissionID, outputIndex}
 	if _, exists := f.deliveries[key]; exists {
 		return nil // INSERT OR IGNORE: never overwrite a link already mailed out
@@ -185,6 +201,9 @@ func (f *fakeEngine) Delivery(submissionID int64, outputIndex int) (store.Delive
 }
 
 func (f *fakeEngine) ExpiredDeliveries(cutoff time.Time) ([]store.Delivery, error) {
+	if f.panicWith != nil {
+		panic(f.panicWith)
+	}
 	var out []store.Delivery
 	for key, d := range f.deliveries {
 		if !f.sweptDeliveries[key] && d.CreatedAt.Before(cutoff) {

@@ -26,3 +26,18 @@ max_attachment_bytes: 20971520
 # Timeout for an outbound Mailgun send (reply). Bounds a hung connection so it
 # can't stall the delivery loop. Defaults to 30 if unset or <= 0.
 send_timeout_seconds: 30
+
+# Operator alerts. Systemic failures (a crashed or timed-out transformer, replies
+# failing for 5 minutes, intake errors, retention sweeps that can't delete) are
+# emailed to this address, from REPLY_FROM. Empty or absent turns them off.
+# Check the channel once with `filemill alert-test`, which sends one test alert.
+#
+# Alerts are throttled: one per category every alert_cooldown_minutes (the next
+# email counts the ones held back), and at most alert_max_per_hour and
+# alert_max_per_day across every category. The daily cap is sized for the
+# Mailgun Free plan, whose 100 sends a day are shared with replies; raise it
+# only on a paid plan. The values shown are the defaults.
+alert_recipient: ""   # e.g. support@example.com
+# alert_cooldown_minutes: 15
+# alert_max_per_hour: 10
+# alert_max_per_day: 20

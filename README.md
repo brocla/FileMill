@@ -115,6 +115,19 @@ records, and (for a laptop with no public IP) a tunnel — that infrastructure
 setup is documented separately in [EMAIL-PIPELINE.md](EMAIL-PIPELINE.md) and
 diagrammed in [email-pipeline-diagram.html](email-pipeline-diagram.html).
 
+To have FileMill email you when it fails systemically (a crashed transformer,
+replies failing for five minutes, intake errors), set `alert_recipient` in
+`config/email.yaml`. Alerts go out through Mailgun from `REPLY_FROM`, and are
+throttled so they can't use up the day's send budget. Check the channel once
+before relying on it:
+
+```powershell
+.\bin\filemill.exe alert-test
+```
+
+It sends one test alert to `alert_recipient`, which counts toward the daily
+alert cap. Run it from a shell that has the Mailgun variables set.
+
 ### Run continuously, in the background
 
 FileMill should run under your Windows account so it can use locally
@@ -140,8 +153,10 @@ in**, and again at logon as a backstop. It launches a **supervisor**
 (`Supervise-FileMill.ps1`) that runs `filemill run` and **restarts it
 automatically if it crashes** — an immediate first retry, then escalating
 backoff (5s, 15s, 30s, 60s, 120s) for repeated rapid failures; a persistent
-crash-loop is logged (alerting is tracked in issue #7). A clean exit (Ctrl+C
-/ shutdown) stops the supervisor.
+crash-loop is logged. When operator alerts are on (`alert_recipient`), the
+restarted worker emails one `restart` alert saying how its predecessor ended,
+throttled so a crash-loop sends one per 15 minutes. A clean exit (Ctrl+C /
+shutdown) stops the supervisor.
 
 Two consequences of running before logon are worth knowing:
 
