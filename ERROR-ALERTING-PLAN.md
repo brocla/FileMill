@@ -1,6 +1,7 @@
 # FileMill Error Alerting — Implementation Plan (issue #7)
 
-**Status:** plan only, not implemented. First drafted 2026-07-19; **revised
+**Status:** Phase 1 (`internal/alert` core and the store `Ledger`) implemented
+2026-09-11; phases 2–5 not started. First drafted 2026-07-19; **revised
 2026-09-11** against the current code. Since the first draft, FileMill gained the
 supervisor loop (#4), boot start, the two retention sweeps, sheets-link delivery,
 and non-blocking delivery. Each adds alert sites, and the supervisor changes how a
@@ -94,10 +95,10 @@ type Mailer interface {
 
 // Ledger is the persisted throttle state. *store.Store satisfies it.
 type Ledger interface {
-    LastAlert(category string) (sentAt time.Time, suppressed int, ok bool, err error)
+    LastAlert(category string) (sentAt time.Time, suppressed int, err error) // zero sentAt: never sent
     RecordAlertSent(category string, at time.Time) error // resets suppressed
     RecordAlertSuppressed(category string) error         // suppressed++
-    AlertsSentSince(t time.Time) (int, error)            // for the global cap
+    AlertSendsSince(t time.Time) ([]time.Time, error)    // sends after t, oldest first
 }
 
 // Emailer is the real Reporter: a throttle in front of a Mailer, draining a
@@ -128,12 +129,20 @@ Two small tables, created like the existing ones in `store.Open`:
 
 ```sql
 CREATE TABLE IF NOT EXISTS alert_state (
-  category TEXT PRIMARY KEY, last_sent_at TEXT NOT NULL, suppressed INTEGER NOT NULL DEFAULT 0);
+  category TEXT PRIMARY KEY, last_sent_at TEXT, suppressed INTEGER NOT NULL DEFAULT 0);
 CREATE TABLE IF NOT EXISTS alert_sends (sent_at TEXT NOT NULL); -- pruned to 24h on write
 ```
 
 `alert_sends` exists only for the global caps. `alert_state` alone can't count sends
-per hour or per day. Keeping 24h of rows covers both windows. Persisting matters
+per hour or per day. Keeping 24h of rows covers both windows. `AlertSendsSince`
+returns the send times, not just a count, so one read serves both caps and gives
+the cap notice its "until <time>" (the oldest send in the window, plus 24h).
+
+`last_sent_at` is nullable because a global cap can suppress a category that has
+never sent, and its count still has to be stored. Times are stored in a
+fixed-width UTC format, not `RFC3339Nano`: that trims trailing zeros, so
+`10:00:00Z` sorts after `10:00:00.5Z`, and these windows are compared as strings
+in SQL. Persisting matters
 most for the daily cap: a crash-looping worker that reset it on every restart
 could spend the whole Free-plan budget.
 
