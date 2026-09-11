@@ -179,17 +179,21 @@ func main() {
 			// this sweep runs unconditionally in continuous mode rather than
 			// nested under the mailgun branch above.
 			go application.SweepExpiredJobs(ctx)
-		}
-		// Only a starting worker may conclude that a job left running is
-		// orphaned, and only here: past the bind, so a second worker that lost
-		// the port has already exited without touching the first one's jobs.
-		// Other commands open the same database and never do this.
-		interrupted, err := application.InterruptLeftoverJobs()
-		if err != nil {
-			fatal(err)
-		}
-		if restart, ok := restartAlert(os.Getenv(previousExitEnv), os.Getenv(rapidRestartsEnv), interrupted); ok {
-			reporter.Report(restart)
+
+			// Only a starting worker may conclude that a job left running is
+			// orphaned, and only the continuous one: it holds the webhook port
+			// by now, so a second worker that lost the bind has already exited
+			// without touching the first one's jobs. --once must never do this
+			// — it binds nothing, and `run --once` alongside the real worker
+			// would mark that worker's live job interrupted, which the delivery
+			// loop takes as finished. Other commands never do it either.
+			interrupted, err := application.InterruptLeftoverJobs()
+			if err != nil {
+				fatal(err)
+			}
+			if restart, ok := restartAlert(os.Getenv(previousExitEnv), os.Getenv(rapidRestartsEnv), interrupted); ok {
+				reporter.Report(restart)
+			}
 		}
 		runErr := application.Run(ctx, once)
 		if server != nil {
