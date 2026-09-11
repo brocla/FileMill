@@ -1,171 +1,274 @@
-# FileMill Error Alerting — Plan
+# FileMill Error Alerting — Implementation Plan (issue #7)
 
-Goal: when something goes **wrong** in FileMill, email an operator alert to
-`support@example.com`, so an unattended background service (it runs at logon on
-a personal laptop) doesn't fail silently.
+**Status:** plan only, not implemented. First drafted 2026-07-19; **revised
+2026-09-11** against the current code. Since the first draft, FileMill gained the
+supervisor loop (#4), boot start, the two retention sweeps, sheets-link delivery,
+and non-blocking delivery. Each adds alert sites, and the supervisor changes how a
+crash can be reported at all.
 
-Status: **plan only, not implemented.** Written 2026-07-20.
+Goal: when FileMill fails *systemically*, email the operator (the address in
+`config/email.yaml`, which is gitignored; examples here use `support@example.com`),
+so an unattended worker doesn't fail silently.
 
-The *sending* is trivial — FileMill already has a working Mailgun Send path
-(`Service.send` in `internal/mailgun/outbound.go`). The work is deciding
-**which** failures alert, **not** drowning `support@` in noise, and handling the
-cases email structurally can't cover.
-
----
-
-## 1. Guiding principles
-
-1. **Alert on systemic failures, stay silent on expected ones.** A malformed
-   PDF that a transformer cleanly rejected is a *normal outcome the sender
-   already hears about* — it must not page an operator. A transformer that
-   crashed, timed out, or produced no valid result is *systemic* — alert.
-2. **Throttle everything.** Loops and bots can generate thousands of identical
-   errors. Deduplication + rate limiting is mandatory, not optional.
-3. **Never let alerting recurse or crash the app.** An alert-send that fails is
-   logged and dropped; it must never trigger another alert or panic.
-4. **Email can't report that the app is gone.** Total-crash / machine-asleep
-   detection needs an external heartbeat, not self-sent email. In scope as a
-   complementary Phase 4, called out honestly.
+Sending is the easy part: `Service.send` in `internal/mailgun/outbound.go`
+already works. The real work is deciding **which** failures alert, **throttling**
+them, and being honest about what email **cannot** report.
 
 ---
 
-## 2. What alerts, and what doesn't
+## 1. Principles
 
-| Failure | Code site | Alert `support@`? | Why |
-|---|---|---|---|
-| Forged / replayed webhook (401) | `webhook.go` `receive` | **No** | Bots scan public URLs; would flood |
-| Malformed / oversize body (400) | `receive` | **No** | Client noise |
-| Unrouted recipient / disallowed sender (silent 200) | `receive` | **No** | Benign |
-| **Intake failure (500)** — storage / filesystem / Submit | `receive` → `intake` | **Yes** | Systemic |
-| **Job: transformer missing from config** | `app.go` `execute` | **Yes** | Systemic (misconfig) |
-| **Job: transformer timed out** | `execute` | **Yes** | Systemic |
-| **Job: missing / corrupt `result.json`** | `execute` → `readResult` | **Yes** | Systemic (contract violation) |
-| **Job: nonzero exit with no usable result** | `execute` | **Yes** | Systemic (crash) |
-| Job: transformer cleanly reported `success:false` (bad input) | `execute` | **No** | Expected; sender already told in the reply |
-| **Delivery failure** — Mailgun send non-2xx | `outbound.go` `deliverPending`/`send` | **Yes (throttled)** | Replies aren't going out |
-| **Worker loop dies** (`store.Next` error → `fatal`) | `app.go` `Run` → `main` | **Yes** | Catastrophic |
-| **Panic** in worker or delivery goroutine | `Run`, `Deliver` | **Yes** | Would otherwise crash silently |
+1. **Alert on systemic failures, stay silent on expected ones.** A PDF that a
+   transformer cleanly rejected is a normal outcome the sender already hears about.
+   A transformer that crashed, timed out, or broke the contract is systemic.
+2. **Throttle everything, and keep the throttle state across restarts.** The
+   delivery loop ticks every second, and the supervisor restarts a crashing worker
+   every ≤120s. An in-memory throttle resets on every restart, so a crash-loop
+   would still send an alert per restart. Throttle state lives in SQLite.
+3. **Alerting never blocks, recurses, or crashes.** `Report` enqueues and returns.
+   A failed alert send is logged and dropped, never re-reported.
+4. **A process can't report its own death.** A crash is reported by the *next*
+   process, the one the supervisor restarts. "Never came back" or "machine offline"
+   is the heartbeat's job (#5), not this issue's.
 
-The subtle one is the two kinds of "job failed." Today `a.finish(id,"failed",msg)`
-lumps them. The split hinges on **whether the transformer honored the contract**:
-a valid `result.json` with `success:false` = *handled* (no alert); a crash /
-timeout / missing / corrupt result = *systemic* (alert).
+---
+
+## 2. What alerts
+
+| Failure | Code site | Alert? | Category | Notes |
+|---|---|---|---|---|
+| Forged/stale webhook (401), malformed/oversize body (400) | `webhook.go` `receive` | No | — | Bot/client noise |
+| Unrouted recipient, disallowed sender, no attachments, rejected file type | `receive` | No | — | Benign or sender's fault |
+| **Intake failure (500)** — storage/filesystem/Submit | `receive` → `intake` | **Yes** | `intake` | Mailgun retries ~8h; the throttle absorbs the retry burst |
+| `store(notify=)` route misconfiguration warning | `receive` | **Yes** | `route-config` | Today it's a log WARNING only; every real submission is being lost |
+| **Transformer missing from config** | `app.go` `execute` | **Yes** | `job-systemic` | Misconfiguration |
+| **Transformer timed out** | `execute` | **Yes** | `job-systemic` | |
+| **Missing/corrupt/invalid `result.json`** | `execute` → `readResult` | **Yes** | `job-systemic` | Contract violation |
+| **Nonzero exit without a valid `success:false` result** | `execute` | **Yes** | `job-systemic` | Crash |
+| Valid `result.json` with `success:false` | `execute` | No | — | Sender told in the reply |
+| **Panic while running a job** | `execute` (new `recover`) | **Yes** | `panic` | Job marked failed; worker continues |
+| **Reply send failing** (non-2xx, timeout) for ≥5 min | `outbound.go` `deliver` | **Yes** | `delivery` | Time-based, not per tick, to ride out a blip (§3.5) |
+| **`MarkEmailDelivered` failing after a successful send** | `deliver` | **Yes, no grace period** | `delivery-mark` | Resends the reply **every second** (#6). Most urgent alert in the table |
+| **Sheets-link publish failing** (token expired, quota, Drive outage) | `deliver` → `publish` | **Yes** | `publish` | Can persist for hours |
+| **Drive file orphaned** (`PutDelivery` failed after upload) | `publish` | **Yes** | `publish-orphan` | Names the file ID for manual cleanup |
+| **Job claim error** (`store.Next`) persisting ≥1 min | `app.go` `Run` | **Yes** | `worker-claim` | Today it retries silently forever; a stuck DB halts all work |
+| Retention sweep: Drive delete failures | `mailgun/retention.go` | **Yes** | `sweep-drive` | World-editable files outliving the 30-day promise |
+| Retention sweep: workspace delete failures | `app/retention.go` | **Yes** | `sweep-jobs` | Low urgency; throttled daily anyway |
+| **Worker restarted after a crash** | startup (via supervisor, §3.6) | **Yes** | `restart` | Includes exit code and rapid-restart count |
+| **Jobs interrupted** (running at the last shutdown) | `store.Open` marks them `interrupted` | **Yes, if N > 0** | `restart` | Second crash signal that needs no supervisor |
+| Startup `fatal()` (bad config, DB, incomplete env, bind failure) | `main.go` | **No** | — | No reporter exists yet; covered by heartbeat #5 |
+| Mailgun send itself failing | `send` | **Can't** | — | The alert channel is the broken thing; heartbeat #5 |
+
+**The job-failure split** (`execute`), decided by whether the transformer honored
+the contract:
+
+- `result.json` valid and `success:false` → handled. No alert, whatever the exit code.
+- `result.json` valid, `success:true`, but nonzero exit → systemic (the result contradicts the exit code).
+- Anything else that fails (timeout, missing/invalid result, missing transformer) → systemic.
 
 ---
 
 ## 3. Design
 
-### 3.1 A `Reporter` dependency (DI, testable)
+### 3.1 New package `internal/alert`
 
-Introduce an interface, following the `Engine` pattern already in the codebase:
+Neither `app` nor `mailgun` can own this: `mailgun` imports `app`, and both need to
+report. A leaf package both import:
 
 ```go
-type Reporter interface {
-    // Report records a systemic failure. Implementations must be non-blocking
-    // enough for hot paths, must throttle, and must never panic or recurse.
-    Report(category string, detail string, err error)
+type Alert struct {
+    Category string // throttle key, e.g. "job-systemic"
+    Summary  string // one line; becomes the subject
+    Detail   string // job id, operation, input name, error, truncated output
 }
+
+// Reporter records a systemic failure. Report must not block or panic.
+type Reporter interface{ Report(Alert) }
+
+type Nop struct{}          // the default: alerting disabled
+
+// Mailer sends one plain-text message. *mailgun.Service satisfies it.
+type Mailer interface {
+    SendAlert(ctx context.Context, to, subject, text string) error
+}
+
+// Ledger is the persisted throttle state. *store.Store satisfies it.
+type Ledger interface {
+    LastAlert(category string) (sentAt time.Time, suppressed int, ok bool, err error)
+    RecordAlertSent(category string, at time.Time) error // resets suppressed
+    RecordAlertSuppressed(category string) error         // suppressed++
+    AlertsSentSince(t time.Time) (int, error)            // for the global cap
+}
+
+// Emailer is the real Reporter: a throttle in front of a Mailer, draining a
+// buffered channel on its own goroutine so Report never blocks a hot path.
+func NewEmailer(m Mailer, l Ledger, to string, cfg Config, now func() time.Time, log *log.Logger) *Emailer
+func (e *Emailer) Run(ctx context.Context) // started by main; drains the queue
 ```
 
-- A **no-op reporter** is the default (alerting disabled).
-- A **Mailgun-backed reporter** emails `support@example.com` via the existing
-  send path, with throttling in front.
-- Both `*app.App` and the mailgun `Service` take a `Reporter` (constructor
-  injection), so job-side and email-side systemic failures funnel to one place.
-- Tests use a `fakeReporter` that records calls — per the project's
-  isolation-testing preference.
+- `Report` does a non-blocking send on a buffered channel (e.g. 64). If the buffer
+  is full, it logs and drops the alert. A flood that fills it would be throttled
+  anyway.
+- The throttle is **per-category cooldown** (default 15 min), plus a **global cap**
+  (default 10 emails/hour). A suppressed alert increments the count, and the next
+  email for that category says "N more since the last alert".
+- Clock, Mailer and Ledger are all injected, so the throttle is tested without
+  sleeping, SQLite or the network.
 
-### 3.2 Throttle / dedupe (the mandatory middle layer)
+### 3.2 Persistence (`internal/store`)
 
-A small stateful wrapper in front of the Mailgun reporter:
+Two small tables, created like the existing ones in `store.Open`:
 
-- **Per-category cooldown:** at most one email per `category` per window
-  (default ~15 min). The next email for a suppressed category includes a
-  "N more occurrences since last alert" count.
-- **Global cap:** a hard ceiling (e.g. ≤ N alert emails/hour) as a backstop.
-- Rationale: the delivery loop ticks every second, so an unthrottled delivery
-  failure = one email/second; a bot spraying 401s (already excluded) would be
-  worse still.
-
-### 3.3 The feedback loop
-
-- The Mailgun reporter's own send failures are **log-only** — never re-reported.
-- "Mailgun send is failing" therefore may not reach `support@` at all (it needs
-  the very channel that's down). This is the structural gap that Phase 4's
-  heartbeat covers.
-
-### 3.4 Configuration
-
-Add to `config/email.yaml` (non-secret; secrets stay in env):
-
-```yaml
-alert_recipient: support@example.com     # empty/absent => alerting disabled
-# alert_from: filemill@mill.example.com  # optional; defaults to REPLY_FROM
-# alert_cooldown_minutes: 15
+```sql
+CREATE TABLE IF NOT EXISTS alert_state (
+  category TEXT PRIMARY KEY, last_sent_at TEXT NOT NULL, suppressed INTEGER NOT NULL DEFAULT 0);
+CREATE TABLE IF NOT EXISTS alert_sends (sent_at TEXT NOT NULL); -- pruned to 24h on write
 ```
 
-Alerting is enabled only when `alert_recipient` is set and Mailgun is configured.
+`alert_sends` exists only for the global cap. `alert_state` alone can't count sends
+per hour.
 
-### 3.5 Alert content
+### 3.3 Mailgun changes
 
-Subject: `[FileMill] <category>`. Body: timestamp, category, job ID / operation /
-input filename where relevant, the error text, and the transformer's captured
-stderr for job crashes. **Open decision:** stderr can contain fragments of the
-input file — decide whether to include it or a truncated/redacted form.
+- `send` currently applies `replySubject`, which adds a "Re:" prefix, inside the
+  function. Move that to the caller (`deliver`) so `send` takes its subject
+  verbatim. Then add `SendAlert(ctx, to, subject, text)` as a thin call to `send`
+  with no attachments and no threading headers.
+- Alerts come from `REPLY_FROM`. Subject: `[FileMill] <summary>`.
+- `Service` gets a `reporter alert.Reporter` field that defaults to `alert.Nop{}`,
+  plus `SetReporter`.
+- `fileConfig` gets `alert_recipient` (empty means disabled),
+  `alert_cooldown_minutes` and `alert_max_per_hour`.
+
+### 3.4 App changes
+
+- `App` gets `reporter alert.Reporter` (default `Nop`) and `SetReporter`. It's a
+  setter, not a constructor argument, because `app.Open` runs before the Mailgun
+  service that the real reporter needs exists.
+- `execute` is reshaped around the split in §2. Systemic branches call `Report` with
+  the job ID, operation, input name, message and the last 2 KB of transformer
+  output (already captured by `CombinedOutput`).
+- A `defer`/`recover` around each job marks the job failed, reports `panic` with
+  the stack, and lets `Run` continue.
+- `Run` tracks the time of the first consecutive claim error and reports
+  `worker-claim` once it has persisted for ≥1 min.
+
+### 3.5 Delivery failure sensitivity
+
+A 3-tick grace period is 3 seconds, which isn't a blip ride-out. Instead
+`Service` keeps an in-memory `firstFailure map[int64]time.Time` keyed by
+submission ID. It is set on the first failure, cleared on success, and alerts
+(`delivery` or `publish`) once a submission has failed for ≥5 min.
+`MarkEmailDelivered` failures skip the grace period, because each second of delay
+is another duplicate reply.
+
+This map is the natural first step toward #6's per-submission failure count and
+dead-letter state. Building #6's retry cap at the same time would remove the
+resend storm that `delivery-mark` exists to report.
+
+### 3.6 Reporting crashes across a restart
+
+The supervisor can't send email, and a crashed process can't report itself. So:
+
+1. `Supervise-FileMill.ps1` sets `FILEMILL_PREVIOUS_EXIT` (the last exit code;
+   unset on the first launch) and `FILEMILL_RAPID_RESTARTS` in the child's
+   environment before each launch.
+2. At startup, once the reporter is wired, `run` reports `restart` if
+   `FILEMILL_PREVIOUS_EXIT` is set. The summary is "restarted after exit code N",
+   plus "(crash-loop: K rapid restarts)" when K ≥ 4, the supervisor's existing
+   threshold.
+3. `store.Open` already marks any `running` job `interrupted`. Return the count
+   from `Open` (or expose it) and fold it into the same `restart` alert.
+
+Because the throttle is persisted (§3.2), a crash-loop sends **one** `restart`
+alert per cooldown with a suppressed count, not one per restart. The case this
+can't cover is a worker that dies before the reporter is wired (startup `fatal`),
+which is left to heartbeat #5.
+
+### 3.7 Wiring in `main.go` (`run`, continuous mode only)
+
+```
+app.Open → mailgun.Load → if alert_recipient set:
+    emailer := alert.NewEmailer(mail, store, …); go emailer.Run(ctx)
+    application.SetReporter(emailer); mail.SetReporter(emailer)
+    report restart / interrupted jobs (§3.6)
+```
+
+`--once` mode and a Mailgun-less configuration keep `Nop`. `emailer.Run` should
+drain the queue on shutdown within the existing 10s window, so an alert raised
+during shutdown still goes out.
 
 ---
 
-## 4. Phasing
+## 4. Phases (one PR each; tests with fakes written first, per project convention)
 
-Each phase builds and tests independently.
+**Phase 1 — `internal/alert` core.**
+- Write `fakeMailer`, `fakeLedger` and a fake clock, then the tests, then
+  `Emailer`.
+- Tests:
+  - N identical reports inside the cooldown → 1 email; the next email after the cooldown carries a suppressed count of N-1.
+  - Different categories don't suppress each other.
+  - The global cap holds across categories.
+  - A failed send is logged, not retried or re-reported.
+  - `Report` never blocks when the queue is full.
+  - Throttle state survives a new `Emailer` built over the same ledger, simulating a restart.
+- Real `Ledger` in `store`, with its own tests against a temp DB.
+- **Nothing is wired yet**, so there is no behavior change.
 
-- **Phase 0 — `Reporter` interface + no-op + `fakeReporter` + isolation tests.**
-  Inject into `App` and `Service`; default no-op; nothing emails yet.
-- **Phase 1 — split systemic vs handled in `execute`.** Call `reporter.Report`
-  at the systemic branches only (transformer-missing, timeout, missing/corrupt
-  result, crash-without-result). No email yet — verify via `fakeReporter` that
-  *only* systemic paths report and handled `success:false` does not. This is
-  good design independent of alerting.
-- **Phase 2 — Mailgun-backed reporter + config + throttle/dedupe.** Reuse the
-  `send` path (with the `sendBase` injection already present for testing).
-  Isolation-test the throttle: N rapid identical reports → one email with a
-  suppressed-count.
-- **Phase 3 — wire the remaining sites:** delivery failures (throttled),
-  `recover()` in the `Run` and `Deliver` goroutines (report then continue/exit
-  cleanly instead of crashing), and the worker-loop fatal in `main`.
-- **Phase 4 (adjacent, optional) — external heartbeat.** FileMill pings a
-  dead-man's-switch (e.g. healthchecks.io) every few minutes; if the ping stops,
-  *that* service emails you. This is the only thing that catches "the process is
-  dead / the laptop slept," which self-sent email cannot. Mostly external setup
-  plus a small ticker in `run`.
+**Phase 2 — job taxonomy split.**
+- `App.SetReporter` plus a `fakeReporter` in the `app` tests.
+- Table-driven `execute` tests use tiny fake transformer scripts: clean
+  `success:false`, `success:false` with nonzero exit, timeout, missing
+  `result.json`, invalid contract version, `success:true` with nonzero exit,
+  missing transformer, and panic recovery.
+- The assertion is that *only* the systemic cases report, and job statuses and
+  messages are unchanged from today.
 
-Partial coverage to accept: **startup `fatal()`s** (bad config, can't open the
-DB, incomplete Mailgun env) happen *before* the reporter exists, so they won't
-email unless we special-case loading just enough config early to send one
-message before exit. Deferred; the heartbeat covers "never started" anyway.
+**Phase 3 — Mailgun sites and wiring.**
+- Move `replySubject` to the caller and add `SendAlert`.
+- Config fields, `Service.SetReporter`, and the 5-minute delivery and publish
+  grace period.
+- Immediate `delivery-mark`, `publish-orphan`, `intake`, `route-config`, and both
+  sweeps.
+- Wire everything in `main.go`, and add `alert_recipient` to
+  `email.yaml.example`.
+- Tests go through the existing `fakeEngine` plus a `fakeReporter`.
+- **Alerting goes live here.**
+
+**Phase 4 — crash reporting across restarts.**
+- Supervisor env vars, the startup `restart` report, and the interrupted-job count
+  from `store.Open`.
+- Add `recover` to the `Deliver` tick and both sweep loops; each reports `panic`
+  and keeps looping.
+- Remove the "log-only; alerting tracked in issue #7" wording from the supervisor
+  script and README.
+- Verify by hand: kill the worker from an elevated shell and confirm that one
+  `restart` email arrives, and that a forced crash-loop still produces one.
+
+**Phase 5 — live verification.**
+- Set the real `alert_recipient` in the gitignored `config/email.yaml`.
+- Trigger one alert per sink: a transformer that exits 1 with no result, a bad
+  Mailgun domain for delivery, and a restart.
+- Confirm the throttle by forcing a repeated failure for 20 minutes and expecting
+  two emails, the second carrying a suppressed count.
+
+**Estimate:** about 3 days. Phase 1 (the throttle and persistence) is the bulk.
+Phases 2 and 3 are about 1 day together. Phase 4 is half a day.
 
 ---
 
-## 5. Scope estimate
+## 5. Decisions (recommended defaults; change before Phase 3 if needed)
 
-- Phase 0–1: ~0.5–1 day (interface, split, tests).
-- Phase 2: ~1 day (reporter, config, throttle — the throttle is the bulk).
-- Phase 3: ~0.5 day (wiring + panic recovery).
-- Phase 4: mostly external config + a small ticker.
-
-Roughly 2–3 days for something trustworthy. The sending is minutes; the
-taxonomy split, throttle, and panic-recovery are the real work.
-
----
-
-## 6. Open decisions (resolve before Phase 2)
-
-1. **Cooldown/digest style:** per-category cooldown with suppressed-count
-   (recommended) vs a periodic digest email vs alert-on-every-occurrence
-   (rejected — spam).
-2. **Transformer stderr in alert bodies:** include (best for diagnosis) vs
-   omit/redact (may echo input-file content).
-3. **From address:** reuse `REPLY_FROM` (`filemill@`) vs a dedicated `alerts@`.
-4. **Heartbeat (Phase 4):** in scope now, or a separate later effort?
-5. **Delivery-failure sensitivity:** how many consecutive failures before the
-   first alert (immediate vs after 2–3 ticks, to ride out a blip)?
+1. **Throttle style:** per-category cooldown (15 min) with suppressed counts, plus a
+   global cap (10/hour). No digest emails.
+2. **Transformer output in alerts:** include the last 2 KB. The recipient is the
+   operator, who already holds the input files under `data/jobs/`, so this reveals
+   nothing new to them. It is also the most useful diagnostic.
+3. **From address:** reuse `REPLY_FROM`. No new Mailgun sender to set up.
+4. **Delivery sensitivity:** 5 min of continuous failure per submission; immediate
+   for `delivery-mark`.
+5. **Heartbeat:** out of scope here, tracked as #5. It is the only cover for
+   startup fatals, a Mailgun outage, and a machine that is off.
+6. **Ordering with #6:** do #6's retry cap before or alongside Phase 3. Otherwise
+   the first real `delivery-mark` alert arrives *after* the sender has already had
+   dozens of duplicate replies.
