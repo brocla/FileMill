@@ -1,7 +1,8 @@
 # FileMill Error Alerting — Implementation Plan (issue #7)
 
-**Status:** Phase 1 (`internal/alert` core and the store `Ledger`) and phase 2
-(job taxonomy split) implemented 2026-09-11; phases 3–5 not started. First drafted 2026-07-19; **revised
+**Status:** Phases 1–3 implemented 2026-09-11: the `internal/alert` core and
+store `Ledger`, the job taxonomy split, and the Mailgun alert sites with their
+wiring. Alerting is off until `alert_recipient` is set. Phases 4–5 not started. First drafted 2026-07-19; **revised
 2026-09-11** against the current code. Since the first draft, FileMill gained the
 supervisor loop (#4), boot start, the two retention sweeps, sheets-link delivery,
 and non-blocking delivery. Each adds alert sites, and the supervisor changes how a
@@ -171,8 +172,8 @@ could spend the whole Free-plan budget.
   verbatim. Then add `SendAlert(ctx, to, subject, text)` as a thin call to `send`
   with no attachments and no threading headers.
 - Alerts come from `REPLY_FROM`. Subject: `[FileMill] <summary>`.
-- `Service` gets a `reporter alert.Reporter` field that defaults to `alert.Nop{}`,
-  plus `SetReporter`.
+- `Service` gets a `reporter alert.Reporter` field, where nil means disabled (most
+  tests build a `Service` literal), plus `SetReporter`.
 - `fileConfig` gets `alert_recipient` (empty means disabled),
   `alert_cooldown_minutes`, `alert_max_per_hour` (default 10) and
   `alert_max_per_day` (default 20).
@@ -231,7 +232,8 @@ which is left to heartbeat #5.
 
 ```
 app.Open → mailgun.Load → if alert_recipient set:
-    emailer := alert.NewEmailer(mail, store, …); go emailer.Run(ctx)
+    emailer := alert.NewEmailer(mail, application, …); go emailer.Run(ctx)
+    (the App is the Ledger: it hands the ledger calls to its store, like its other store methods)
     application.SetReporter(emailer); mail.SetReporter(emailer)
     report restart / interrupted jobs (§3.6)
 ```
