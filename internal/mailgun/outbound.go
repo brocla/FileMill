@@ -181,13 +181,22 @@ func (s *Service) markDelivered(id int64) error {
 // to. An unlabelled error is a failing reply: "delivery".
 type deliveryError struct {
 	category string
+	file     string // the Drive file id, for publish-orphan
 	err      error
 }
 
 func (e *deliveryError) Error() string { return e.err.Error() }
 func (e *deliveryError) Unwrap() error { return e.err }
 
-func failedAt(category string, err error) error { return &deliveryError{category, err} }
+func failedAt(category string, err error) error {
+	return &deliveryError{category: category, err: err}
+}
+
+// orphanedFile labels an upload whose record failed, naming the Drive file
+// left behind.
+func orphanedFile(fileID string, err error) error {
+	return &deliveryError{category: "publish-orphan", file: fileID, err: err}
+}
 
 func categoryOf(err error) string {
 	var labelled *deliveryError
@@ -197,10 +206,22 @@ func categoryOf(err error) string {
 	return "delivery"
 }
 
+func fileOf(err error) string {
+	var labelled *deliveryError
+	if errors.As(err, &labelled) {
+		return labelled.file
+	}
+	return ""
+}
+
 // deliveryOutage is one submission's unbroken run of failed deliveries.
 type deliveryOutage struct {
-	since    time.Time
-	reported bool
+	since time.Time
+	// reported is the category already reported for this outage, so the same
+	// failure isn't reported every tick. A different category is a different
+	// problem and reports on its own — delivery-mark above all, which must
+	// never wait behind an earlier publish or delivery alert.
+	reported string
 }
 
 // deliveryFailed reports a failing submission once per outage: after
@@ -212,9 +233,12 @@ func (s *Service) deliveryFailed(sub store.EmailSubmission, err error) {
 	now := s.clock()
 	category := categoryOf(err)
 	if category == "publish-orphan" {
+		// The summary names the file because the throttle emails only the
+		// first orphan per cooldown; the rest are logged by summary alone, and
+		// the id is all anyone has to delete it by hand.
 		s.report(alert.Alert{
 			Category: category,
-			Summary:  "published Drive file orphaned",
+			Summary:  fmt.Sprintf("published Drive file orphaned: %s", fileOf(err)),
 			Detail: submissionDetail(sub, err) +
 				"\nThe file was uploaded to Google Drive, but its record was not saved, so the retention sweep will never delete it. Delete it by hand.\n",
 		})
@@ -233,10 +257,10 @@ func (s *Service) deliveryFailed(sub store.EmailSubmission, err error) {
 	if category == "delivery-mark" {
 		grace = 0
 	}
-	if outage.reported || now.Sub(outage.since) < grace {
+	if outage.reported == category || now.Sub(outage.since) < grace {
 		return
 	}
-	outage.reported = true
+	outage.reported = category
 	s.report(alert.Alert{
 		Category: category,
 		Summary:  outageSummary(category),
@@ -305,7 +329,7 @@ func (s *Service) publish(ctx context.Context, submissionID int64, outputs []app
 		if err := s.engine.PutDelivery(submissionID, i, fileID, link); err != nil {
 			// The upload succeeded but is now unrecorded, so a retry would
 			// re-upload it. Name the orphan so it can be found by hand.
-			return nil, failedAt("publish-orphan", fmt.Errorf("record published file %s (now orphaned in Drive): %w", fileID, err))
+			return nil, orphanedFile(fileID, fmt.Errorf("record published file %s (now orphaned in Drive): %w", fileID, err))
 		}
 		links = append(links, link)
 	}

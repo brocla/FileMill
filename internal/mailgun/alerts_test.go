@@ -153,6 +153,32 @@ func TestMarkFailureReportsAtOnce(t *testing.T) {
 	}
 }
 
+// The grace period is per submission, but delivery-mark exists to fire at
+// once. A submission that already reported a publish outage must still report
+// a reply that went out and could not be marked: until that is fixed, every
+// restart sends the sender another duplicate.
+func TestMarkFailureAfterAPublishOutageStillReports(t *testing.T) {
+	f, rep, clock := newAlertingFixture(t)
+	f.addSubmission(t, 1, "iwk@mill.test", "schedule.xlsx")
+	f.publisher.err = fmt.Errorf("google token expired")
+
+	tick(t, f)
+	clock.advance(5 * time.Minute)
+	tick(t, f)
+	if len(rep.only("publish")) != 1 {
+		t.Fatalf("alerts = %+v, want the publish outage reported first", rep.alerts)
+	}
+
+	// Drive recovers, the reply goes out, and now the mark fails.
+	f.publisher.err = nil
+	f.engine.markErr = fmt.Errorf("disk I/O error")
+	tick(t, f)
+
+	if got := rep.only("delivery-mark"); len(got) != 1 {
+		t.Fatalf("a mark failure after a publish outage went unreported; alerts = %+v", rep.alerts)
+	}
+}
+
 // An upload whose record failed leaves a world-editable file in Drive that the
 // retention sweep will never delete. Each one is reported at once, naming the
 // file, since only a person can clean it up.
@@ -171,6 +197,12 @@ func TestOrphanedDriveFileReportsAtOnce(t *testing.T) {
 	for i, id := range []string{"drive-file-1", "drive-file-2"} {
 		if !strings.Contains(got[i].Detail, id) {
 			t.Errorf("orphan alert %d does not name %s:\n%s", i+1, id, got[i].Detail)
+		}
+		// The throttle emails only the first orphan in a cooldown; the rest are
+		// logged by summary alone, so the summary has to carry the file id or
+		// the only record of what to delete by hand is lost.
+		if !strings.Contains(got[i].Summary, id) {
+			t.Errorf("orphan summary %d does not name %s: %q", i+1, id, got[i].Summary)
 		}
 	}
 	if len(rep.only("publish")) != 0 {
