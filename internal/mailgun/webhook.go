@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 
+	"filemill/internal/alert"
 	"filemill/internal/app"
 )
 
@@ -75,7 +76,13 @@ func (s *Service) receive(r *http.Request) (status int, reason string) {
 		// leaves the bytes behind a storage URL. Every real submission would
 		// vanish here, looking exactly like ordinary empty mail, so name it.
 		if declared := declaredAttachments(r); declared > 0 {
-			return http.StatusOK, fmt.Sprintf("WARNING: message declares %d attachment(s) but none arrived inline — is the Mailgun route using store(notify=) instead of forward(url)? (to %s from %s)", declared, recipient, sender)
+			reason := fmt.Sprintf("WARNING: message declares %d attachment(s) but none arrived inline — is the Mailgun route using store(notify=) instead of forward(url)? (to %s from %s)", declared, recipient, sender)
+			s.report(alert.Alert{
+				Category: "route-config",
+				Summary:  "Mailgun route is not forwarding attachments",
+				Detail:   reason + "\n\nEvery submission to this address is lost until its Mailgun route uses forward(url).\n",
+			})
+			return http.StatusOK, reason
 		}
 		// Routine, but still recorded: with nothing logged at all, a message
 		// that arrived and one that never did looked identical.
@@ -112,6 +119,12 @@ func (s *Service) receive(r *http.Request) (status int, reason string) {
 			// Mailgun stops retrying, and record who sent it and why.
 			return http.StatusOK, fmt.Sprintf("attachment rejected from %s: %v", sender, err)
 		}
+		s.report(alert.Alert{
+			Category: "intake",
+			Summary:  "webhook intake failing",
+			Detail: fmt.Sprintf("Recipient: %s\nSender: %s\nOperation: %s\n\nError: %v\n\nThe webhook returned 500, so Mailgun will retry this message for several hours.\n",
+				recipient, sender, operation, err),
+		})
 		return http.StatusInternalServerError, fmt.Sprintf("intake failed from %s: %v", sender, err)
 	}
 	return http.StatusOK, fmt.Sprintf("accepted: sender=%q recipient=%q operation=%s", sender, r.FormValue("recipient"), operation)

@@ -58,6 +58,7 @@ type fakeEngine struct {
 
 	deliveries      map[deliveryKey]store.Delivery
 	sweptDeliveries map[deliveryKey]bool
+	putDeliveryErr  error // when set, PutDelivery fails with it
 
 	// labels maps an operation to the report name a reply calls it by. An
 	// operation absent here falls back to its own name, as the real engine does.
@@ -174,6 +175,9 @@ type deliveryKey struct {
 
 func (f *fakeEngine) PutDelivery(submissionID int64, outputIndex int, fileID, link string) error {
 	f.calls = append(f.calls, fmt.Sprintf("PutDelivery(%d,%d)", submissionID, outputIndex))
+	if f.putDeliveryErr != nil {
+		return f.putDeliveryErr
+	}
 	key := deliveryKey{submissionID, outputIndex}
 	if _, exists := f.deliveries[key]; exists {
 		return nil // INSERT OR IGNORE: never overwrite a link already mailed out

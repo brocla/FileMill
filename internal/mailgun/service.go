@@ -20,6 +20,7 @@ import (
 	"net/http"
 	"time"
 
+	"filemill/internal/alert"
 	"filemill/internal/app"
 	"filemill/internal/store"
 )
@@ -100,8 +101,45 @@ type Service struct {
 	// delivered mark failed, so the delivery loop retries only the mark (see
 	// markDelivered). Only the delivery goroutine touches it; nil until needed.
 	sentUnmarked map[int64]bool
+
+	// Operator alerts (internal/alert). reporter is nil until SetReporter, and
+	// report treats nil as disabled, so a Service built in a test needs none.
+	reporter alert.Reporter
+	alertTo  string       // alert_recipient from email.yaml; empty disables alerting
+	alertCfg alert.Config // alert throttle settings from email.yaml
+
+	// failing holds each submission whose delivery keeps failing, for the grace
+	// period before it is reported (see deliveryFailed). Only the delivery
+	// goroutine touches it; nil until needed.
+	failing map[int64]*deliveryOutage
+	now     func() time.Time // nil means time.Now; tests set a fake clock
 }
 
 // Handler returns the webhook HTTP handler. It is mounted by cmd/filemill run
 // only in continuous worker mode.
 func (s *Service) Handler() http.Handler { return http.HandlerFunc(s.handle) }
+
+// SetReporter routes the adapter's systemic failures to r. Call it before the
+// webhook server and delivery loop start.
+func (s *Service) SetReporter(r alert.Reporter) { s.reporter = r }
+
+// AlertRecipient is the operator address from email.yaml. Empty means
+// alerting is off.
+func (s *Service) AlertRecipient() string { return s.alertTo }
+
+// AlertConfig is the alert throttle's settings from email.yaml. Zero fields
+// take the alert package's defaults.
+func (s *Service) AlertConfig() alert.Config { return s.alertCfg }
+
+func (s *Service) report(a alert.Alert) {
+	if s.reporter != nil {
+		s.reporter.Report(a)
+	}
+}
+
+func (s *Service) clock() time.Time {
+	if s.now != nil {
+		return s.now()
+	}
+	return time.Now()
+}

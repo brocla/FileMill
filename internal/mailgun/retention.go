@@ -2,7 +2,11 @@ package mailgun
 
 import (
 	"context"
+	"fmt"
+	"strings"
 	"time"
+
+	"filemill/internal/alert"
 )
 
 const (
@@ -43,8 +47,10 @@ func (s *Service) SweepExpired(ctx context.Context) {
 //
 // A file that fails to delete is logged and left unmarked, so the next sweep
 // tries again; one unreachable file must not strand the rest of the batch. The
-// delete itself is idempotent — a file already gone counts as deleted — so a
-// record marked after a crash-interrupted sweep is never a problem.
+// failures are reported together, once per sweep: each is a world-editable
+// copy of a sender's data outliving the retention promise. The delete itself
+// is idempotent — a file already gone counts as deleted — so a record marked
+// after a crash-interrupted sweep is never a problem.
 //
 // A sweep that deleted something says so. Retention runs unattended, on a daily
 // timer, and removes other people's data: if only failures were logged, a sweep
@@ -59,9 +65,11 @@ func (s *Service) sweepExpired(ctx context.Context) error {
 		return err
 	}
 	deleted := 0
+	var failed []string
 	for _, record := range expired {
 		if err := s.publisher.Delete(ctx, record.FileID); err != nil {
 			s.log.Printf("retention sweep: delete %s (submission %d): %v", record.FileID, record.SubmissionID, err)
+			failed = append(failed, fmt.Sprintf("%s (submission %d): %v", record.FileID, record.SubmissionID, err))
 			continue
 		}
 		deleted++
@@ -69,8 +77,17 @@ func (s *Service) sweepExpired(ctx context.Context) error {
 			s.log.Printf("retention sweep: record deletion of %s: %v", record.FileID, err)
 		}
 	}
+	days := int(retentionPeriod.Hours() / 24)
 	if deleted > 0 {
-		s.log.Printf("retention sweep: deleted %d published file(s) older than %d days", deleted, int(retentionPeriod.Hours()/24))
+		s.log.Printf("retention sweep: deleted %d published file(s) older than %d days", deleted, days)
+	}
+	if len(failed) > 0 {
+		s.report(alert.Alert{
+			Category: "sweep-drive",
+			Summary:  fmt.Sprintf("retention sweep could not delete %d Drive file(s)", len(failed)),
+			Detail: fmt.Sprintf("These published files are past the %d-day retention period and are still shared with anyone who has the link. The next sweep retries them.\n\n%s\n",
+				days, strings.Join(failed, "\n")),
+		})
 	}
 	return nil
 }

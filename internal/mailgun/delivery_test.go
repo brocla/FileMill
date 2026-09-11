@@ -48,8 +48,8 @@ func (p *fakePublisher) Delete(_ context.Context, fileID string) error {
 
 // sentMessage is one reply captured from the fake Mailgun endpoint.
 type sentMessage struct {
-	to, text    string
-	attachments []string
+	to, subject, text string
+	attachments       []string
 }
 
 // fakeMailgun is a stand-in Send API that records replies. Addresses listed in
@@ -81,6 +81,8 @@ func (m *fakeMailgun) start(t *testing.T) *httptest.Server {
 				msg.attachments = append(msg.attachments, part.FileName())
 			case part.FormName() == "to":
 				msg.to = string(buf[:n])
+			case part.FormName() == "subject":
+				msg.subject = string(buf[:n])
 			case part.FormName() == "text":
 				msg.text = string(buf[:n])
 			}

@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"filemill/internal/alert"
 	"filemill/internal/app"
 	"filemill/internal/gsheets"
 	"gopkg.in/yaml.v3"
@@ -32,6 +33,12 @@ type fileConfig struct {
 	Allowed     []string          `yaml:"allowed_senders"`
 	Max         int64             `yaml:"max_attachment_bytes"`
 	SendTimeout int               `yaml:"send_timeout_seconds"`
+
+	// Operator alerts; see alertSettings.
+	AlertRecipient       string `yaml:"alert_recipient"`
+	AlertCooldownMinutes int    `yaml:"alert_cooldown_minutes"`
+	AlertMaxPerHour      int    `yaml:"alert_max_per_hour"`
+	AlertMaxPerDay       int    `yaml:"alert_max_per_day"`
 }
 
 // credentials holds the Google OAuth secrets the sheets-link delivery mode
@@ -93,6 +100,9 @@ func Load(root string, engine *app.App, logger *log.Logger) (*Service, error) {
 		return nil, err
 	}
 	s.delivery = delivery
+	if s.alertTo, s.alertCfg, err = alertSettings(cfg); err != nil {
+		return nil, err
+	}
 
 	switch {
 	case s.apiKey == "" && s.signKey == "" && s.domain == "" && s.from == "":
@@ -118,6 +128,21 @@ func Load(root string, engine *app.App, logger *log.Logger) (*Service, error) {
 		return layout
 	})
 	return s, nil
+}
+
+// alertSettings reads the operator-alert keys. An empty alert_recipient turns
+// alerting off. Zero throttle settings take the alert package's defaults,
+// whose daily cap is sized for the Mailgun Free plan.
+func alertSettings(cfg fileConfig) (string, alert.Config, error) {
+	to := strings.TrimSpace(cfg.AlertRecipient)
+	if to != "" && !strings.Contains(to, "@") {
+		return "", alert.Config{}, fmt.Errorf("alert_recipient %q is not an email address", to)
+	}
+	return to, alert.Config{
+		Cooldown:   time.Duration(cfg.AlertCooldownMinutes) * time.Minute,
+		MaxPerHour: cfg.AlertMaxPerHour,
+		MaxPerDay:  cfg.AlertMaxPerDay,
+	}, nil
 }
 
 // parseDelivery normalizes the address -> delivery mode map and rejects any

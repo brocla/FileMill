@@ -3,6 +3,7 @@ package mailgun
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"mime/multipart"
@@ -12,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"filemill/internal/alert"
 	"filemill/internal/app"
 	"filemill/internal/store"
 )
@@ -19,6 +21,11 @@ import (
 // deliveryPollInterval is how often the delivery loop checks for submission
 // groups whose jobs have all finished.
 const deliveryPollInterval = time.Second
+
+// deliveryAlertAfter is how long a submission must keep failing before it is
+// reported. Delivery retries every second, and a Mailgun or Drive blip clears
+// well inside this.
+const deliveryAlertAfter = 5 * time.Minute
 
 // Deliver runs the outbound loop until ctx is cancelled: once every job in a
 // submission group is terminal, it mails one threaded reply carrying every
@@ -50,8 +57,9 @@ func (s *Service) Deliver(ctx context.Context) {
 // failure to read the queue itself aborts the tick.
 //
 // Per-submission failure counting and a dead-letter status are a follow-up; for
-// now a stuck submission is retried on every tick, and its log line is the
-// signal that something needs attention.
+// now a stuck submission is retried on every tick. Its log line, and an alert
+// once it has failed for deliveryAlertAfter, are the signal that something
+// needs attention.
 func (s *Service) deliverPending(ctx context.Context) error {
 	subs, err := s.engine.PendingEmails()
 	if err != nil {
@@ -63,7 +71,10 @@ func (s *Service) deliverPending(ctx context.Context) error {
 		}
 		if err := s.deliver(ctx, sub); err != nil {
 			s.log.Printf("delivery: submission %d (from %s): %v", sub.ID, sub.Sender, err)
+			s.deliveryFailed(sub, err)
+			continue
 		}
+		delete(s.failing, sub.ID)
 	}
 	return nil
 }
@@ -136,7 +147,7 @@ func (s *Service) deliver(ctx context.Context, sub store.EmailSubmission) error 
 		}
 	}
 
-	if err := s.send(ctx, sub.Sender, sub.Subject, threadingID(sub.MessageID), text, attachments); err != nil {
+	if err := s.send(ctx, sub.Sender, replySubject(sub.Subject), threadingID(sub.MessageID), text, attachments); err != nil {
 		return err
 	}
 	return s.markDelivered(sub.ID)
@@ -152,10 +163,92 @@ func (s *Service) markDelivered(id int64) error {
 			s.sentUnmarked = map[int64]bool{}
 		}
 		s.sentUnmarked[id] = true
-		return fmt.Errorf("reply sent, but marking it delivered failed (retrying the mark only): %w", err)
+		return failedAt("delivery-mark", fmt.Errorf("reply sent, but marking it delivered failed (retrying the mark only): %w", err))
 	}
 	delete(s.sentUnmarked, id)
 	return nil
+}
+
+// deliveryError labels a delivery failure with the alert category it belongs
+// to. An unlabelled error is a failing reply: "delivery".
+type deliveryError struct {
+	category string
+	err      error
+}
+
+func (e *deliveryError) Error() string { return e.err.Error() }
+func (e *deliveryError) Unwrap() error { return e.err }
+
+func failedAt(category string, err error) error { return &deliveryError{category, err} }
+
+func categoryOf(err error) string {
+	var labelled *deliveryError
+	if errors.As(err, &labelled) {
+		return labelled.category
+	}
+	return "delivery"
+}
+
+// deliveryOutage is one submission's unbroken run of failed deliveries.
+type deliveryOutage struct {
+	since    time.Time
+	reported bool
+}
+
+// deliveryFailed reports a failing submission once per outage: after
+// deliveryAlertAfter, or at once for a failed mark, where every restart before
+// it heals sends another duplicate. An orphaned Drive file is reported every
+// time, since each names a different file that only a person can delete.
+// deliverPending ends the outage when the submission is delivered.
+func (s *Service) deliveryFailed(sub store.EmailSubmission, err error) {
+	now := s.clock()
+	category := categoryOf(err)
+	if category == "publish-orphan" {
+		s.report(alert.Alert{
+			Category: category,
+			Summary:  "published Drive file orphaned",
+			Detail: submissionDetail(sub, err) +
+				"\nThe file was uploaded to Google Drive, but its record was not saved, so the retention sweep will never delete it. Delete it by hand.\n",
+		})
+		category = "publish" // the submission itself still gets the grace period
+	}
+
+	if s.failing == nil {
+		s.failing = map[int64]*deliveryOutage{}
+	}
+	outage := s.failing[sub.ID]
+	if outage == nil {
+		outage = &deliveryOutage{since: now}
+		s.failing[sub.ID] = outage
+	}
+	grace := deliveryAlertAfter
+	if category == "delivery-mark" {
+		grace = 0
+	}
+	if outage.reported || now.Sub(outage.since) < grace {
+		return
+	}
+	outage.reported = true
+	s.report(alert.Alert{
+		Category: category,
+		Summary:  outageSummary(category),
+		Detail:   fmt.Sprintf("%s\nFailing since %s, retried every second.\n", submissionDetail(sub, err), outage.since.Format(time.RFC3339)),
+	})
+}
+
+func outageSummary(category string) string {
+	minutes := int(deliveryAlertAfter.Minutes())
+	switch category {
+	case "delivery-mark":
+		return "reply sent but not recorded as delivered"
+	case "publish":
+		return fmt.Sprintf("sheets-link publish failing for %d minutes", minutes)
+	}
+	return fmt.Sprintf("reply delivery failing for %d minutes", minutes)
+}
+
+func submissionDetail(sub store.EmailSubmission, err error) string {
+	return fmt.Sprintf("Submission: %d\nFrom: %s\nTo: %s\nSubject: %s\n\nError: %v\n", sub.ID, sub.Sender, sub.Recipient, sub.Subject, err)
 }
 
 // deliveryMode returns how replies to a recipient address are delivered.
@@ -182,13 +275,13 @@ func (s *Service) deliveryMode(recipient string) string {
 // distributed transaction against Google.
 func (s *Service) publish(ctx context.Context, submissionID int64, outputs []app.OutputFile) ([]string, error) {
 	if s.publisher == nil {
-		return nil, fmt.Errorf("sheets-link delivery is configured for this route but no publisher is available")
+		return nil, failedAt("publish", fmt.Errorf("sheets-link delivery is configured for this route but no publisher is available"))
 	}
 	links := make([]string, 0, len(outputs))
 	for i, out := range outputs {
 		record, published, err := s.engine.Delivery(submissionID, i)
 		if err != nil {
-			return nil, fmt.Errorf("look up published output %d: %w", i, err)
+			return nil, failedAt("publish", fmt.Errorf("look up published output %d: %w", i, err))
 		}
 		if published {
 			links = append(links, record.Link)
@@ -199,12 +292,12 @@ func (s *Service) publish(ctx context.Context, submissionID int64, outputs []app
 		title := strings.TrimSuffix(out.Name, filepath.Ext(out.Name))
 		fileID, link, err := s.publisher.Publish(ctx, out.Path, title)
 		if err != nil {
-			return nil, fmt.Errorf("publish %s: %w", out.Name, err)
+			return nil, failedAt("publish", fmt.Errorf("publish %s: %w", out.Name, err))
 		}
 		if err := s.engine.PutDelivery(submissionID, i, fileID, link); err != nil {
 			// The upload succeeded but is now unrecorded, so a retry would
 			// re-upload it. Name the orphan so it can be found by hand.
-			return nil, fmt.Errorf("record published file %s (now orphaned in Drive): %w", fileID, err)
+			return nil, failedAt("publish-orphan", fmt.Errorf("record published file %s (now orphaned in Drive): %w", fileID, err))
 		}
 		links = append(links, link)
 	}
@@ -263,8 +356,17 @@ func withLinks(text string, links, labels []string) string {
 	return b.String()
 }
 
-// send posts one reply to Mailgun's Send API, threaded into the original
-// conversation and carrying the given output files as attachments.
+// SendAlert sends one plain-text operator alert from REPLY_FROM, with its
+// subject as given: no "Re:", no threading, no attachments. It satisfies
+// alert.Mailer. It never reports its own failure: the alert channel is the
+// broken thing, and reporting it would only loop.
+func (s *Service) SendAlert(ctx context.Context, to, subject, text string) error {
+	return s.send(ctx, to, subject, "", text, nil)
+}
+
+// send posts one message to Mailgun's Send API with its subject as given.
+// With a messageID it is threaded into that conversation, and it carries the
+// given output files as attachments.
 func (s *Service) send(ctx context.Context, to, subject, messageID, text string, outputs []string) error {
 	var body bytes.Buffer
 	writer := multipart.NewWriter(&body)
@@ -272,7 +374,7 @@ func (s *Service) send(ctx context.Context, to, subject, messageID, text string,
 	fields := map[string]string{
 		"from":    s.from,
 		"to":      to,
-		"subject": replySubject(subject),
+		"subject": subject,
 		"text":    text,
 	}
 	if messageID != "" {
