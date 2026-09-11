@@ -1,8 +1,9 @@
 # FileMill Error Alerting — Implementation Plan (issue #7)
 
-**Status:** Phases 1–3 implemented 2026-09-11: the `internal/alert` core and
-store `Ledger`, the job taxonomy split, and the Mailgun alert sites with their
-wiring. Alerting is off until `alert_recipient` is set. Phases 4–5 not started. First drafted 2026-07-19; **revised
+**Status:** Phases 1–4 implemented 2026-09-11: the `internal/alert` core and
+store `Ledger`, the job taxonomy split, the Mailgun alert sites with their
+wiring, and crash reporting across restarts. Phase 4's manual kill test and
+phase 5's live verification are still to do. First drafted 2026-07-19; **revised
 2026-09-11** against the current code. Since the first draft, FileMill gained the
 supervisor loop (#4), boot start, the two retention sweeps, sheets-link delivery,
 and non-blocking delivery. Each adds alert sites, and the supervisor changes how a
@@ -220,8 +221,12 @@ The supervisor can't send email, and a crashed process can't report itself. So:
    `FILEMILL_PREVIOUS_EXIT` is set. The summary is "restarted after exit code N",
    plus "(crash-loop: K rapid restarts)" when K ≥ 4, the supervisor's existing
    threshold.
-3. `store.Open` already marks any `running` job `interrupted`. Return the count
-   from `Open` (or expose it) and fold it into the same `restart` alert.
+3. Fold the count of jobs left `running` into the same `restart` alert. As built,
+   `store.Open` no longer marks them `interrupted`: every CLI command opens the
+   database, and one run mid-job marked the worker's live job `interrupted`,
+   which delivery treats as finished. The worker does it instead, through
+   `Store.InterruptRunning`, once it holds the webhook port and just before the
+   job loop. The job's message asks the sender to send the file again.
 
 Because the throttle is persisted (§3.2), a crash-loop sends **one** `restart`
 alert per cooldown with a suppressed count, not one per restart. The case this
