@@ -65,6 +65,8 @@ the contract:
 
 - `result.json` valid and `success:false` → handled. No alert, whatever the exit code.
 - `result.json` valid, `success:true`, but nonzero exit → systemic (the result contradicts the exit code).
+  The job's message says so rather than repeating the transformer's success text,
+  which would tell the sender their report is ready in a reply with nothing attached.
 - Anything else that fails (timeout, missing/invalid result, missing transformer,
   a command that won't start) → systemic.
 - Killed because the worker itself is shutting down (Ctrl+C, a failed webhook

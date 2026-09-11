@@ -326,7 +326,12 @@ func (a *App) execute(parent context.Context, j store.Job) {
 		case readErr != nil:
 			a.failSystemic(j, msg, fmt.Errorf("%w; %w", err, readErr), output)
 		default:
-			a.failSystemic(j, msg, fmt.Errorf("result.json reports success, but the transformer ended with %w", err), output)
+			// The result claims success but the exit code contradicts it. The
+			// transformer's own message would tell the sender their report is
+			// ready in a reply with nothing attached, so say what happened
+			// instead, and keep its message for the alert.
+			a.failSystemic(j, "transformer reported success but then exited with an error",
+				fmt.Errorf("the transformer ended with %w; its result.json said %q", err, result.Message), output)
 		}
 		return
 	}

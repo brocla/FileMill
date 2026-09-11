@@ -12,8 +12,9 @@ import (
 
 // Only failures that are FileMill's problem report. A transformer that turned
 // its input down through the contract is the sender's problem, and they hear
-// about it in the reply. Job statuses and messages are the same either way:
-// alerting adds a report, it changes nothing the sender sees.
+// about it in the reply. Reporting changes nothing the sender sees: statuses
+// and messages are as they were before alerting, except that a result
+// contradicting its exit code now says so instead of claiming success.
 func TestExecuteReportsOnlySystemicFailures(t *testing.T) {
 	for _, tc := range []struct {
 		name       string
@@ -41,8 +42,8 @@ func TestExecuteReportsOnlySystemicFailures(t *testing.T) {
 		{name: "invalid contract version", mode: "bad-version",
 			wantStatus: store.StatusFailed, wantMsg: `unsupported result contract version "0"`, wantReport: true},
 		{name: "success:true with nonzero exit", mode: "succeed-exit",
-			wantStatus: store.StatusFailed, wantMsg: "done",
-			wantReport: true, wantDetail: "exit status 3"},
+			wantStatus: store.StatusFailed, wantMsg: "transformer reported success but then exited with an error",
+			wantReport: true, wantDetail: `exit status 3; its result.json said "done"`},
 		{name: "timeout", mode: "hang", timeout: time.Second,
 			wantStatus: store.StatusFailed, wantMsg: "transformer timed out after 10 minutes", wantReport: true},
 		{name: "transformer no longer configured", mode: "succeed",
