@@ -39,6 +39,9 @@ type fileConfig struct {
 	AlertCooldownMinutes int    `yaml:"alert_cooldown_minutes"`
 	AlertMaxPerHour      int    `yaml:"alert_max_per_hour"`
 	AlertMaxPerDay       int    `yaml:"alert_max_per_day"`
+
+	// SupportAddress is named at the bottom of every reply; see supportAddress.
+	SupportAddress string `yaml:"support_address"`
 }
 
 // credentials holds the Google OAuth secrets the sheets-link delivery mode
@@ -103,6 +106,9 @@ func Load(root string, engine *app.App, logger *log.Logger) (*Service, error) {
 	if s.alertTo, s.alertCfg, err = alertSettings(cfg); err != nil {
 		return nil, err
 	}
+	if s.support, err = supportAddress(cfg); err != nil {
+		return nil, err
+	}
 
 	switch {
 	case s.apiKey == "" && s.signKey == "" && s.domain == "" && s.from == "":
@@ -143,6 +149,17 @@ func alertSettings(cfg fileConfig) (string, alert.Config, error) {
 		MaxPerHour: cfg.AlertMaxPerHour,
 		MaxPerDay:  cfg.AlertMaxPerDay,
 	}, nil
+}
+
+// supportAddress reads the address a reply invites the sender to write to. It
+// lives in email.yaml rather than the code because it is deployment-specific.
+// Empty turns the footer off.
+func supportAddress(cfg fileConfig) (string, error) {
+	address := strings.TrimSpace(cfg.SupportAddress)
+	if address != "" && !strings.Contains(address, "@") {
+		return "", fmt.Errorf("support_address %q is not an email address", address)
+	}
+	return address, nil
 }
 
 // parseDelivery normalizes the address -> delivery mode map and rejects any

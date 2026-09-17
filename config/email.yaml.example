@@ -41,3 +41,8 @@ alert_recipient: ""   # e.g. support@example.com
 # alert_cooldown_minutes: 15
 # alert_max_per_hour: 10
 # alert_max_per_day: 20
+
+# Closes every reply to a sender, success or failure, with:
+#   Questions, problems, or suggestions? Your feedback is welcome at <address>.
+# Empty or absent leaves the line off.
+support_address: ""   # e.g. support@example.com

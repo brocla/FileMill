@@ -94,6 +94,7 @@ type Service struct {
 	delivery map[string]string // recipient address -> delivery mode (absent = modeEmail)
 	allowed  map[string]bool   // envelope senders permitted to submit (empty = all)
 	maxBytes int64             // per-attachment size limit
+	support  string            // support_address from email.yaml, closing every reply; empty omits it
 
 	sendBase string       // Mailgun Send API base URL; overridable in tests
 	client   *http.Client // outbound HTTP client (carries the send timeout)
