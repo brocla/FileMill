@@ -155,6 +155,8 @@ func (s *Service) deliver(ctx context.Context, sub store.EmailSubmission) error 
 		}
 	}
 
+	text = withSupportFooter(text, s.support)
+
 	if err := s.send(ctx, sub.Sender, replySubject(sub.Subject), threadingID(sub.MessageID), text, attachments); err != nil {
 		return err
 	}
@@ -386,6 +388,20 @@ func withLinks(text string, links, labels []string) string {
 		b.WriteString(link)
 	}
 	return b.String()
+}
+
+// withSupportFooter closes a reply with an invitation to write to the support
+// address, whether the jobs succeeded or failed -- a sender whose report did not
+// come out is the one who most needs to know where to turn.
+//
+// It is set off by a blank line, not the "-- " signature delimiter: many mail
+// clients dim or fold what follows that delimiter, and this line is meant to be
+// read. The address is left bare; clients make it a link on their own.
+func withSupportFooter(text, address string) string {
+	if address == "" {
+		return text
+	}
+	return fmt.Sprintf("%s\n\nQuestions, problems, or suggestions? Your feedback is welcome at %s.", text, address)
 }
 
 // SendAlert sends one plain-text operator alert from REPLY_FROM, with its
