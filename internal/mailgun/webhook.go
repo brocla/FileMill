@@ -67,8 +67,8 @@ func (s *Service) receive(r *http.Request) (status int, reason string) {
 	}
 	body := &countingBody{ReadCloser: r.Body}
 	r.Body = body
-	if err := parseForm(r); err != nil {
-		return formFailure(err, body, r.ContentLength)
+	if status, reason, failed := bodyFailure(parseForm(r), body, r.ContentLength); failed {
+		return status, reason
 	}
 	if !authenticSignature(s.signKey, r.FormValue("timestamp"), r.FormValue("token"), r.FormValue("signature")) {
 		return http.StatusUnauthorized, "invalid signature"
@@ -159,24 +159,28 @@ func (c *countingBody) Read(p []byte) (int, error) {
 	return n, err
 }
 
-// formFailure classifies a body that failed to parse. The parser stops at the
-// first error, often long before the end, so the rest is drained first: only a
-// body read to its end can be judged malformed. A cut-off upload - Mailgun
-// gives up after 10 seconds - is not the sender's fault and is retried (500);
-// a body that is too large or arrived whole and still would not parse can
-// never succeed, so it is refused for good (406).
-func formFailure(err error, body *countingBody, declared int64) (int, string) {
+// bodyFailure judges the request body after parsing, reporting failed when the
+// request must not go on. The rest of the body is drained first: the parser
+// stops at its first error, often long before the end, and it also takes a
+// clean end-of-stream between parts as the end of the form - so a body cut
+// short there parses without error, and only the byte count shows it is
+// incomplete. A cut-off upload (Mailgun gives up after 10 seconds) is not the
+// sender's fault and is retried (500); a body that is too large, or arrived
+// whole and still would not parse, can never succeed and is refused (406).
+func bodyFailure(parseErr error, body *countingBody, declared int64) (status int, reason string, failed bool) {
 	_, _ = io.Copy(io.Discard, body)
 	var tooLarge *http.MaxBytesError
 	switch {
-	case errors.As(err, &tooLarge) || errors.As(body.err, &tooLarge):
-		return http.StatusNotAcceptable, fmt.Sprintf("request body exceeds %d bytes", tooLarge.Limit)
+	case errors.As(parseErr, &tooLarge) || errors.As(body.err, &tooLarge):
+		return http.StatusNotAcceptable, fmt.Sprintf("request body exceeds %d bytes", tooLarge.Limit), true
 	case body.err != nil:
-		return http.StatusInternalServerError, fmt.Sprintf("request body incomplete: got %d bytes: %v", body.n, body.err)
+		return http.StatusInternalServerError, fmt.Sprintf("request body incomplete: got %d bytes: %v", body.n, body.err), true
 	case declared > 0 && body.n < declared:
-		return http.StatusInternalServerError, fmt.Sprintf("request body incomplete: got %d of %d bytes: %v", body.n, declared, err)
+		return http.StatusInternalServerError, fmt.Sprintf("request body incomplete: got %d of %d bytes", body.n, declared), true
+	case parseErr != nil:
+		return http.StatusNotAcceptable, fmt.Sprintf("malformed request body: %v", parseErr), true
 	}
-	return http.StatusNotAcceptable, fmt.Sprintf("malformed request body: %v", err)
+	return 0, "", false
 }
 
 // arrival describes when an email was sent (its Date header), when Mailgun

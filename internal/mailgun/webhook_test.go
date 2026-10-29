@@ -125,28 +125,32 @@ func TestWebhookRefusesBodyOverTheRequestLimit(t *testing.T) {
 // A body that stops short of its Content-Length was cut off in transit - on
 // 2026-10-28 Mailgun hung up after 10 seconds mid-upload. That is not the
 // sender's fault and the retry will likely succeed, so it must stay retryable.
+// Every cut point is tried: the multipart parser takes a clean end-of-stream
+// between parts as the end of the form, so some cuts parse without error and
+// only the byte count catches them.
 func TestWebhookRetriesBodyCutOffBeforeContentLength(t *testing.T) {
-	logger, buf := captureLogger()
-	s := &Service{signKey: "key", maxBytes: 1024, routes: map[string]string{"workerlist@mill.example.com": "workerlist"}, allowed: map[string]bool{}, log: logger}
-	full := signedMultipart(t, s.signKey,
+	full := signedMultipart(t, "key",
 		map[string]string{"recipient": "workerlist@mill.example.com"},
 		map[string][]byte{"attachment-1": []byte("pdf")})
 	raw, err := io.ReadAll(full.Body)
 	if err != nil {
 		t.Fatal(err)
 	}
-	half := raw[:len(raw)/2]
-	r := httptest.NewRequest(http.MethodPost, "/mailgun-webhook", bytes.NewReader(half))
-	r.Header.Set("Content-Type", full.Header.Get("Content-Type"))
-	r.ContentLength = int64(len(raw))
-	w := httptest.NewRecorder()
-	s.handle(w, r)
-	if w.Code != http.StatusInternalServerError {
-		t.Fatalf("got %d, want 500 (a cut-off upload must be retried)", w.Code)
-	}
-	want := fmt.Sprintf("request body incomplete: got %d of %d bytes", len(half), len(raw))
-	if !strings.Contains(buf.String(), want) {
-		t.Errorf("log must contain %q; got %q", want, buf.String())
+	for cut := 1; cut < len(raw); cut++ {
+		logger, buf := captureLogger()
+		s := &Service{engine: newFakeEngine(), signKey: "key", maxBytes: 1024, routes: map[string]string{"workerlist@mill.example.com": "workerlist"}, allowed: map[string]bool{}, log: logger}
+		r := httptest.NewRequest(http.MethodPost, "/mailgun-webhook", bytes.NewReader(raw[:cut]))
+		r.Header.Set("Content-Type", full.Header.Get("Content-Type"))
+		r.ContentLength = int64(len(raw))
+		w := httptest.NewRecorder()
+		s.handle(w, r)
+		if w.Code != http.StatusInternalServerError {
+			t.Fatalf("cut at %d of %d: got %d, want 500 (a cut-off upload must be retried)", cut, len(raw), w.Code)
+		}
+		want := fmt.Sprintf("request body incomplete: got %d of %d bytes", cut, len(raw))
+		if !strings.Contains(buf.String(), want) {
+			t.Fatalf("cut at %d: log must contain %q; got %q", cut, want, buf.String())
+		}
 	}
 }
 
