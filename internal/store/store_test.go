@@ -12,7 +12,7 @@ import (
 // days. Test-only, hence its home here rather than in the store's API.
 func (s *Store) backdateDelivery(submissionID int64, outputIndex int, when time.Time) error {
 	_, err := s.db.Exec("UPDATE email_deliveries SET created_at=? WHERE submission_id=? AND output_index=?",
-		when.UTC().Format(time.RFC3339Nano), submissionID, outputIndex)
+		formatTime(when), submissionID, outputIndex)
 	return err
 }
 
@@ -20,8 +20,115 @@ func (s *Store) backdateDelivery(submissionID int64, outputIndex int, when time.
 // have to wait 30 days. Test-only, hence its home here rather than in the
 // store's API.
 func (s *Store) backdateJobCompletion(id string, when time.Time) error {
-	_, err := s.db.Exec("UPDATE jobs SET completed_at=? WHERE id=?", when.UTC().Format(time.RFC3339Nano), id)
+	_, err := s.db.Exec("UPDATE jobs SET completed_at=? WHERE id=?", formatTime(when), id)
 	return err
+}
+
+// Times are compared as text in SQL, so one completed half a second after the
+// cutoff must not sort before it. RFC3339Nano trims trailing zeros and gets
+// this wrong: "10:00:00.5Z" sorts before "10:00:00Z".
+func TestExpiredJobsOrdersTimesWithinASecond(t *testing.T) {
+	s, _ := openTestStore(t)
+	whole := time.Date(2026, 10, 28, 10, 0, 0, 0, time.UTC)
+	if err := s.Create(Job{ID: "job", Operation: "copy_rename", InputName: "a.txt", CreatedAt: whole}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Complete("job", StatusSucceeded, "ok"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.backdateJobCompletion("job", whole.Add(500*time.Millisecond)); err != nil {
+		t.Fatal(err)
+	}
+
+	if got, err := s.ExpiredJobs(whole); err != nil || len(got) != 0 {
+		t.Fatalf("ExpiredJobs(cutoff before completion) = %v, %v; want none", got, err)
+	}
+	if got, err := s.ExpiredJobs(whole.Add(time.Second)); err != nil || len(got) != 1 {
+		t.Fatalf("ExpiredJobs(cutoff after completion) = %v, %v; want the job", got, err)
+	}
+}
+
+func TestExpiredDeliveriesOrdersTimesWithinASecond(t *testing.T) {
+	s, _ := openTestStore(t)
+	whole := time.Date(2026, 10, 28, 10, 0, 0, 0, time.UTC)
+	if err := s.PutDelivery(1, 0, "file", "https://docs.google.com/file"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.backdateDelivery(1, 0, whole.Add(500*time.Millisecond)); err != nil {
+		t.Fatal(err)
+	}
+
+	if got, err := s.ExpiredDeliveries(whole); err != nil || len(got) != 0 {
+		t.Fatalf("ExpiredDeliveries(cutoff before creation) = %+v, %v; want none", got, err)
+	}
+	if got, err := s.ExpiredDeliveries(whole.Add(time.Second)); err != nil || len(got) != 1 {
+		t.Fatalf("ExpiredDeliveries(cutoff after creation) = %+v, %v; want the delivery", got, err)
+	}
+}
+
+// Every timestamp the store writes is fixed-width, so text order is time order
+// for all of them, not only the ones a test happens to compare.
+func TestStoredTimesAreFixedWidth(t *testing.T) {
+	s, _ := openTestStore(t)
+	if err := s.Create(Job{ID: "job", Operation: "copy_rename", InputName: "a.txt", CreatedAt: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Next(); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Complete("job", StatusSucceeded, "ok"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.MarkJobFilesDeleted("job"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Create(Job{ID: "orphan", Operation: "copy_rename", InputName: "b.txt", CreatedAt: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Next(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.InterruptRunning(); err != nil {
+		t.Fatal(err)
+	}
+	id, _, err := s.BeginEmail("<m@example.com>", "a@example.com", "b@example.com", "subject")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.MarkEmailDelivered(id); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.PutDelivery(id, 0, "file", "https://docs.google.com/file"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.MarkDeliveryDeleted(id, 0); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, query := range []string{
+		"SELECT created_at FROM jobs",
+		"SELECT started_at FROM jobs",
+		"SELECT completed_at FROM jobs",
+		"SELECT files_deleted_at FROM jobs WHERE id='job'",
+		"SELECT delivered_at FROM email_submissions",
+		"SELECT created_at FROM email_deliveries",
+		"SELECT deleted_at FROM email_deliveries",
+	} {
+		rows, err := s.db.Query(query)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for rows.Next() {
+			var raw string
+			if err := rows.Scan(&raw); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := time.Parse(timeFormat, raw); err != nil {
+				t.Errorf("%s: %q is not fixed-width: %v", query, raw, err)
+			}
+		}
+		rows.Close()
+	}
 }
 
 // A published Drive file is recorded before the reply is sent, so a retry after

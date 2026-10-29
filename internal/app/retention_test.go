@@ -10,12 +10,11 @@ import (
 )
 
 // A completed job past the retention horizon has its workspace deleted; one
-// well inside the horizon is left alone. jobRetentionPeriod is temporarily
-// shrunk so the test does not wait 30 real days for a job it just completed.
+// inside the horizon is left alone. The sweep's clock is set 30 days past a
+// boundary taken between the two completions, so the cutoff falls exactly
+// there. A slow machine only widens the gaps on either side of it - an earlier
+// version raced a 100ms horizon against the real clock and lost on slow CI.
 func TestSweepExpiredJobsDeletesOldWorkspaceOnly(t *testing.T) {
-	restore := jobRetentionPeriod
-	defer func() { jobRetentionPeriod = restore }()
-
 	root := t.TempDir()
 	writeTransformers(t, root, `transformers:
   - operation: copy_rename
@@ -40,11 +39,10 @@ func TestSweepExpiredJobsDeletesOldWorkspaceOnly(t *testing.T) {
 	if err := a.store.Complete(oldID, store.StatusSucceeded, "ok"); err != nil {
 		t.Fatal(err)
 	}
-	time.Sleep(500 * time.Millisecond)
-
-	// Shrink the horizon only now, so oldID (completed 500ms ago) falls well
-	// outside it while freshID (completed a moment from now) stays well inside.
-	jobRetentionPeriod = 100 * time.Millisecond
+	// The pauses only make the three times distinct on Windows' coarse clock.
+	time.Sleep(20 * time.Millisecond)
+	boundary := time.Now()
+	time.Sleep(20 * time.Millisecond)
 
 	freshID, err := a.Submit("copy_rename", src)
 	if err != nil {
@@ -53,6 +51,7 @@ func TestSweepExpiredJobsDeletesOldWorkspaceOnly(t *testing.T) {
 	if err := a.store.Complete(freshID, store.StatusSucceeded, "ok"); err != nil {
 		t.Fatal(err)
 	}
+	a.now = func() time.Time { return boundary.Add(jobRetentionPeriod) }
 
 	if err := a.sweepExpiredJobs(); err != nil {
 		t.Fatalf("sweepExpiredJobs: %v", err)
@@ -83,10 +82,6 @@ func TestSweepExpiredJobsDeletesOldWorkspaceOnly(t *testing.T) {
 // crashed after RemoveAll but before marking the row — must not make the
 // sweep error out. RemoveAll on an absent path is success, not failure.
 func TestSweepExpiredJobsToleratesAlreadyMissingWorkspace(t *testing.T) {
-	restore := jobRetentionPeriod
-	jobRetentionPeriod = time.Millisecond
-	defer func() { jobRetentionPeriod = restore }()
-
 	root := t.TempDir()
 	writeTransformers(t, root, `transformers:
   - operation: copy_rename
@@ -113,7 +108,7 @@ func TestSweepExpiredJobsToleratesAlreadyMissingWorkspace(t *testing.T) {
 	if err := os.RemoveAll(filepath.Join(root, "data", "jobs", id)); err != nil {
 		t.Fatal(err)
 	}
-	time.Sleep(5 * time.Millisecond)
+	expireEverything(t, a)
 
 	if err := a.sweepExpiredJobs(); err != nil {
 		t.Fatalf("sweepExpiredJobs must tolerate an already-missing workspace: %v", err)
