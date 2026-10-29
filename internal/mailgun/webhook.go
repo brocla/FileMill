@@ -4,11 +4,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"mime/multipart"
 	"net/http"
+	"net/mail"
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"filemill/internal/alert"
 	"filemill/internal/app"
@@ -21,7 +24,8 @@ const requestOverhead = 1 << 20 // 1 MiB
 // handle is the webhook entry point. It delegates the decision to receive and
 // then maps the single (status, reason) result onto the HTTP response: reasons
 // are logged (useful for a public endpoint), and 4xx/5xx additionally send an
-// error body so Mailgun can distinguish "don't retry" (4xx) from "retry" (5xx).
+// error body. Mailgun itself only distinguishes 406 ("don't retry") from every
+// other non-200 code ("retry").
 func (s *Service) handle(w http.ResponseWriter, r *http.Request) {
 	// Unconditional arrival log: any request that reaches this handler is
 	// recorded before any check, so "did the POST arrive?" is never ambiguous.
@@ -43,10 +47,15 @@ func (s *Service) handle(w http.ResponseWriter, r *http.Request) {
 // taxonomy is deliberate:
 //
 //	200 - accepted, or "received, nothing to do" (Mailgun should stop)
-//	400 - the client's fault; do not retry (malformed body, oversize)
 //	401 - bad, missing, or stale signature
 //	405 - not a POST
-//	500 - our fault; please retry (storage, filesystem, submit failures)
+//	406 - can never succeed; do not retry (malformed body, oversize)
+//	500 - our fault or the network's; please retry (cut-off upload, storage,
+//	      filesystem, submit failures)
+//
+// Mailgun retries every non-200 response except 406, on a fixed schedule over
+// 8 hours, so a permanent refusal must be 406 - a 400 is retried just like a
+// 500.
 //
 // A rejected attachment (wrong file type) is the sender's fault and can never
 // succeed on retry, so it maps to 200, not 500 — returning 500 made Mailgun
@@ -56,8 +65,10 @@ func (s *Service) receive(r *http.Request) (status int, reason string) {
 	if r.Method != http.MethodPost {
 		return http.StatusMethodNotAllowed, "method not allowed"
 	}
-	if err := parseForm(r); err != nil {
-		return http.StatusBadRequest, "malformed request body"
+	body := &countingBody{ReadCloser: r.Body}
+	r.Body = body
+	if status, reason, failed := bodyFailure(parseForm(r), body, r.ContentLength); failed {
+		return status, reason
 	}
 	if !authenticSignature(s.signKey, r.FormValue("timestamp"), r.FormValue("token"), r.FormValue("signature")) {
 		return http.StatusUnauthorized, "invalid signature"
@@ -110,7 +121,7 @@ func (s *Service) receive(r *http.Request) (status int, reason string) {
 	}
 
 	if !s.withinSizeLimit(files) {
-		return http.StatusBadRequest, fmt.Sprintf("attachment exceeds size limit (to %s from %s)", recipient, sender)
+		return http.StatusNotAcceptable, fmt.Sprintf("attachment exceeds size limit (to %s from %s)", recipient, sender)
 	}
 
 	if err := s.intake(r, operation, files); err != nil {
@@ -127,7 +138,85 @@ func (s *Service) receive(r *http.Request) (status int, reason string) {
 		})
 		return http.StatusInternalServerError, fmt.Sprintf("intake failed from %s: %v", sender, err)
 	}
-	return http.StatusOK, fmt.Sprintf("accepted: sender=%q recipient=%q operation=%s", sender, r.FormValue("recipient"), operation)
+	return http.StatusOK, fmt.Sprintf("accepted: sender=%q recipient=%q operation=%s %s", sender, r.FormValue("recipient"), operation, s.arrival(r))
+}
+
+// countingBody counts the bytes read from a request body and keeps the first
+// read error, so a body that would not parse can be told apart: cut off in
+// transit, or complete but malformed.
+type countingBody struct {
+	io.ReadCloser
+	n   int64
+	err error
+}
+
+func (c *countingBody) Read(p []byte) (int, error) {
+	n, err := c.ReadCloser.Read(p)
+	c.n += int64(n)
+	if err != nil && err != io.EOF && c.err == nil {
+		c.err = err
+	}
+	return n, err
+}
+
+// bodyFailure judges the request body after parsing, reporting failed when the
+// request must not go on. The rest of the body is drained first: the parser
+// stops at its first error, often long before the end, and it also takes a
+// clean end-of-stream between parts as the end of the form - so a body cut
+// short there parses without error, and only the byte count shows it is
+// incomplete. A cut-off upload (Mailgun gives up after 10 seconds) is not the
+// sender's fault and is retried (500); a body that is too large, or arrived
+// whole and still would not parse, can never succeed and is refused (406).
+func bodyFailure(parseErr error, body *countingBody, declared int64) (status int, reason string, failed bool) {
+	_, _ = io.Copy(io.Discard, body)
+	var tooLarge *http.MaxBytesError
+	switch {
+	case errors.As(parseErr, &tooLarge) || errors.As(body.err, &tooLarge):
+		return http.StatusNotAcceptable, fmt.Sprintf("request body exceeds %d bytes", tooLarge.Limit), true
+	case body.err != nil:
+		return http.StatusInternalServerError, fmt.Sprintf("request body incomplete: got %d bytes: %v", body.n, body.err), true
+	case declared > 0 && body.n < declared:
+		return http.StatusInternalServerError, fmt.Sprintf("request body incomplete: got %d of %d bytes", body.n, declared), true
+	case parseErr != nil:
+		return http.StatusNotAcceptable, fmt.Sprintf("malformed request body: %v", parseErr), true
+	}
+	return 0, "", false
+}
+
+// arrival describes when an email was sent (its Date header), when Mailgun
+// posted it (the signed timestamp), and the lag from sending to arrival here.
+// Without these, a slow reply could not be placed: before the sender's email
+// reached Mailgun, between Mailgun and here, or after.
+func (s *Service) arrival(r *http.Request) string {
+	posted := "unknown"
+	if unix, err := strconv.ParseInt(r.FormValue("timestamp"), 10, 64); err == nil {
+		posted = time.Unix(unix, 0).UTC().Format(time.RFC3339)
+	}
+	sent, ok := sentAt(r)
+	if !ok {
+		return "sent=unknown posted=" + posted
+	}
+	lag := s.clock().Sub(sent).Round(time.Second)
+	return fmt.Sprintf("sent=%s posted=%s lag=%s", sent.UTC().Format(time.RFC3339), posted, lag)
+}
+
+// sentAt reads the email's Date header. Mailgun posts headers as top-level
+// fields (Message-Id is read the same way), and also as the message-headers
+// JSON list of [name, value] pairs, which is the fallback.
+func sentAt(r *http.Request) (time.Time, bool) {
+	raw := r.FormValue("Date")
+	if raw == "" {
+		var headers [][]string
+		_ = json.Unmarshal([]byte(r.FormValue("message-headers")), &headers)
+		for _, h := range headers {
+			if len(h) == 2 && strings.EqualFold(h[0], "Date") {
+				raw = h[1]
+				break
+			}
+		}
+	}
+	sent, err := mail.ParseDate(raw)
+	return sent, err == nil
 }
 
 // parseForm decodes the request body. Mailgun sends no-attachment notifications

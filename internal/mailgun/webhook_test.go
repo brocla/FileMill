@@ -5,7 +5,9 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
+	"io"
 	"log"
 	"mime/multipart"
 	"net/http"
@@ -70,8 +72,186 @@ func TestWebhookRejectsOversizeAttachment(t *testing.T) {
 		map[string][]byte{"attachment-1": []byte("too large")})
 	w := httptest.NewRecorder()
 	s.handle(w, r)
-	if w.Code != http.StatusBadRequest {
-		t.Fatalf("got %d, want 400", w.Code)
+	if w.Code != http.StatusNotAcceptable {
+		t.Fatalf("got %d, want 406 (an oversize attachment can never succeed on retry)", w.Code)
+	}
+}
+
+// Mailgun retries every non-200 response except 406, so a body that will never
+// parse must get 406 or Mailgun resends it for 8 hours. The parser's error is
+// logged, because "malformed" alone could not be diagnosed after the fact.
+func TestWebhookRefusesMalformedBody(t *testing.T) {
+	logger, buf := captureLogger()
+	s := &Service{signKey: "key", maxBytes: 1024, routes: map[string]string{}, allowed: map[string]bool{}, log: logger}
+	r := httptest.NewRequest(http.MethodPost, "/mailgun-webhook", strings.NewReader("this is not multipart"))
+	r.Header.Set("Content-Type", "multipart/form-data; boundary=xyz")
+	w := httptest.NewRecorder()
+	s.handle(w, r)
+	if w.Code != http.StatusNotAcceptable {
+		t.Fatalf("got %d, want 406", w.Code)
+	}
+	if !strings.Contains(buf.String(), "malformed request body: ") {
+		t.Errorf("the parser's error must be logged; got %q", buf.String())
+	}
+}
+
+func TestWebhookRefusesMultipartWithoutBoundary(t *testing.T) {
+	s := &Service{signKey: "key", maxBytes: 1024, routes: map[string]string{}, allowed: map[string]bool{}, log: discardLogger()}
+	r := httptest.NewRequest(http.MethodPost, "/mailgun-webhook", strings.NewReader("--xyz--"))
+	r.Header.Set("Content-Type", "multipart/form-data")
+	w := httptest.NewRecorder()
+	s.handle(w, r)
+	if w.Code != http.StatusNotAcceptable {
+		t.Fatalf("got %d, want 406", w.Code)
+	}
+}
+
+func TestWebhookRefusesBodyOverTheRequestLimit(t *testing.T) {
+	logger, buf := captureLogger()
+	s := &Service{signKey: "key", maxBytes: 2, routes: map[string]string{"workerlist@mill.example.com": "workerlist"}, allowed: map[string]bool{}, log: logger}
+	r := signedMultipart(t, s.signKey,
+		map[string]string{"recipient": "workerlist@mill.example.com"},
+		map[string][]byte{"attachment-1": bytes.Repeat([]byte("x"), requestOverhead+1024)})
+	w := httptest.NewRecorder()
+	s.handle(w, r)
+	if w.Code != http.StatusNotAcceptable {
+		t.Fatalf("got %d, want 406", w.Code)
+	}
+	if !strings.Contains(buf.String(), "request body exceeds") {
+		t.Errorf("the size refusal must say so; got %q", buf.String())
+	}
+}
+
+// A body that stops short of its Content-Length was cut off in transit - on
+// 2026-10-28 Mailgun hung up after 10 seconds mid-upload. That is not the
+// sender's fault and the retry will likely succeed, so it must stay retryable.
+// Every cut point is tried: the multipart parser takes a clean end-of-stream
+// between parts as the end of the form, so some cuts parse without error and
+// only the byte count catches them.
+func TestWebhookRetriesBodyCutOffBeforeContentLength(t *testing.T) {
+	full := signedMultipart(t, "key",
+		map[string]string{"recipient": "workerlist@mill.example.com"},
+		map[string][]byte{"attachment-1": []byte("pdf")})
+	raw, err := io.ReadAll(full.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for cut := 1; cut < len(raw); cut++ {
+		logger, buf := captureLogger()
+		s := &Service{engine: newFakeEngine(), signKey: "key", maxBytes: 1024, routes: map[string]string{"workerlist@mill.example.com": "workerlist"}, allowed: map[string]bool{}, log: logger}
+		r := httptest.NewRequest(http.MethodPost, "/mailgun-webhook", bytes.NewReader(raw[:cut]))
+		r.Header.Set("Content-Type", full.Header.Get("Content-Type"))
+		r.ContentLength = int64(len(raw))
+		w := httptest.NewRecorder()
+		s.handle(w, r)
+		if w.Code != http.StatusInternalServerError {
+			t.Fatalf("cut at %d of %d: got %d, want 500 (a cut-off upload must be retried)", cut, len(raw), w.Code)
+		}
+		want := fmt.Sprintf("request body incomplete: got %d of %d bytes", cut, len(raw))
+		if !strings.Contains(buf.String(), want) {
+			t.Fatalf("cut at %d: log must contain %q; got %q", cut, want, buf.String())
+		}
+	}
+}
+
+// failingReader yields its data and then a read error, like a connection reset
+// partway through an upload.
+type failingReader struct {
+	data []byte
+	err  error
+}
+
+func (f *failingReader) Read(p []byte) (int, error) {
+	if len(f.data) == 0 {
+		return 0, f.err
+	}
+	n := copy(p, f.data)
+	f.data = f.data[n:]
+	return n, nil
+}
+
+func TestWebhookRetriesBodyWhoseReadFails(t *testing.T) {
+	logger, buf := captureLogger()
+	s := &Service{signKey: "key", maxBytes: 1024, routes: map[string]string{"workerlist@mill.example.com": "workerlist"}, allowed: map[string]bool{}, log: logger}
+	full := signedMultipart(t, s.signKey,
+		map[string]string{"recipient": "workerlist@mill.example.com"},
+		map[string][]byte{"attachment-1": []byte("pdf")})
+	raw, err := io.ReadAll(full.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := httptest.NewRequest(http.MethodPost, "/mailgun-webhook", &failingReader{data: raw[:len(raw)/2], err: errors.New("connection reset by peer")})
+	r.Header.Set("Content-Type", full.Header.Get("Content-Type"))
+	r.ContentLength = -1 // chunked: no length to compare against, only the read error
+	w := httptest.NewRecorder()
+	s.handle(w, r)
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("got %d, want 500 (a failed read must be retried)", w.Code)
+	}
+	if !strings.Contains(buf.String(), "connection reset by peer") {
+		t.Errorf("the read error must be logged; got %q", buf.String())
+	}
+}
+
+// The accept line records when the email was sent (its Date header, in UTC),
+// when Mailgun posted it (the signed timestamp), and the lag from sending to
+// arrival here - so a "my reply was slow" report can be measured from the log.
+func TestWebhookLogsArrivalTimesOnAccept(t *testing.T) {
+	logger, buf := captureLogger()
+	sent := time.Date(2026, 10, 28, 4, 6, 44, 0, time.UTC)
+	s := &Service{engine: newFakeEngine(), signKey: "key", maxBytes: 1024, routes: map[string]string{"workerlist@mill.example.com": "workerlist"}, allowed: map[string]bool{}, log: logger,
+		now: func() time.Time { return sent.Add(18*time.Minute + 19*time.Second + 400*time.Millisecond) }}
+	r := signedMultipart(t, s.signKey,
+		map[string]string{"recipient": "workerlist@mill.example.com", "sender": "sender@example.com", "Date": "Tue, 27 Oct 2026 22:06:44 -0600"},
+		map[string][]byte{"attachment-1": []byte("pdf")})
+	w := httptest.NewRecorder()
+	s.handle(w, r)
+	if w.Code != http.StatusOK {
+		t.Fatalf("got %d, want 200", w.Code)
+	}
+	unix, err := strconv.ParseInt(r.FormValue("timestamp"), 10, 64)
+	if err != nil {
+		t.Fatal(err)
+	}
+	posted := time.Unix(unix, 0).UTC().Format(time.RFC3339)
+	for _, want := range []string{"sent=2026-10-28T04:06:44Z", "posted=" + posted, "lag=18m19s"} {
+		if !strings.Contains(buf.String(), want) {
+			t.Errorf("accept line must contain %q; got %q", want, buf.String())
+		}
+	}
+}
+
+func TestWebhookReadsDateFromMessageHeadersWhenFieldIsAbsent(t *testing.T) {
+	logger, buf := captureLogger()
+	s := &Service{engine: newFakeEngine(), signKey: "key", maxBytes: 1024, routes: map[string]string{"workerlist@mill.example.com": "workerlist"}, allowed: map[string]bool{}, log: logger}
+	headers := `[["Subject", "Sister INI"], ["Date", "Wed, 28 Oct 2026 04:14:49 +0000"]]`
+	r := signedMultipart(t, s.signKey,
+		map[string]string{"recipient": "workerlist@mill.example.com", "sender": "sender@example.com", "message-headers": headers},
+		map[string][]byte{"attachment-1": []byte("pdf")})
+	w := httptest.NewRecorder()
+	s.handle(w, r)
+	if w.Code != http.StatusOK {
+		t.Fatalf("got %d, want 200", w.Code)
+	}
+	if !strings.Contains(buf.String(), "sent=2026-10-28T04:14:49Z") {
+		t.Errorf("Date must be read from message-headers; got %q", buf.String())
+	}
+}
+
+// A missing or garbled Date is logged as unknown and never blocks the email.
+func TestWebhookAcceptsEmailWithUnparseableDate(t *testing.T) {
+	logger, buf := captureLogger()
+	s := &Service{engine: newFakeEngine(), signKey: "key", maxBytes: 1024, routes: map[string]string{"workerlist@mill.example.com": "workerlist"}, allowed: map[string]bool{}, log: logger}
+	r := signedMultipart(t, s.signKey,
+		map[string]string{"recipient": "workerlist@mill.example.com", "sender": "sender@example.com", "Date": "sometime last week"},
+		map[string][]byte{"attachment-1": []byte("pdf")})
+	w := httptest.NewRecorder()
+	s.handle(w, r)
+	if w.Code != http.StatusOK {
+		t.Fatalf("got %d, want 200", w.Code)
+	}
+	if !strings.Contains(buf.String(), "sent=unknown") || strings.Contains(buf.String(), "lag=") {
+		t.Errorf("an unparseable Date must log sent=unknown and no lag; got %q", buf.String())
 	}
 }
 
