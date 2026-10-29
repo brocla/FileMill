@@ -15,12 +15,8 @@ import (
 // jobRetentionPeriod is how long a completed job's workspace stays on disk
 // before the sweep deletes it. By then the sender already has the result —
 // attached, or (for sheets-link) uploaded to Drive — so the local copy is a
-// backup nobody is waiting on.
-//
-// A var, not a const: mailgun's retention test ages records through a fake
-// Engine, but App talks to a concrete *store.Store with no such seam, so its
-// own test shrinks this instead of waiting 30 real days.
-var jobRetentionPeriod = 30 * 24 * time.Hour
+// backup nobody is waiting on. Tests move App's clock instead of waiting.
+const jobRetentionPeriod = 30 * 24 * time.Hour
 
 // removeWorkspace deletes one job's workspace. A var so the sweep's test can
 // make a delete fail, which the filesystem won't do on request.
@@ -89,7 +85,7 @@ func (a *App) sweepJobsTick() {
 // line means something when it does appear — the same reasoning as
 // mailgun.Service.sweepExpired.
 func (a *App) sweepExpiredJobs() error {
-	ids, err := a.store.ExpiredJobs(time.Now().UTC().Add(-jobRetentionPeriod))
+	ids, err := a.store.ExpiredJobs(a.clock().Add(-jobRetentionPeriod))
 	if err != nil {
 		return err
 	}

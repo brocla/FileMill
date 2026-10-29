@@ -11,15 +11,12 @@ import (
 	"filemill/internal/store"
 )
 
-// expireEverything makes the job sweep treat every completed job as past
-// retention, with no waiting. The horizon is a whole hour in the future, not a
-// nanosecond: the store compares RFC3339Nano text, which trims trailing zeros,
-// so times a fraction of a second apart can sort the wrong way.
-func expireEverything(t *testing.T) {
+// expireEverything makes the job sweep treat every job completed so far as
+// past retention, with no waiting, by running the sweep's clock one retention
+// period plus an hour ahead.
+func expireEverything(t *testing.T, a *App) {
 	t.Helper()
-	saved := jobRetentionPeriod
-	jobRetentionPeriod = -time.Hour
-	t.Cleanup(func() { jobRetentionPeriod = saved })
+	a.now = func() time.Time { return time.Now().Add(jobRetentionPeriod + time.Hour) }
 }
 
 func completedJob(t *testing.T, a *App) store.Job {
@@ -36,7 +33,7 @@ func completedJob(t *testing.T, a *App) store.Job {
 func TestSweepExpiredJobsReportsDeleteFailures(t *testing.T) {
 	a, rep := newTestApp(t, fakeTransformer(t, "succeed")...)
 	j := completedJob(t, a)
-	expireEverything(t)
+	expireEverything(t, a)
 	saved := removeWorkspace
 	removeWorkspace = func(string) error { return errors.New("access is denied") }
 	t.Cleanup(func() { removeWorkspace = saved })
@@ -59,7 +56,7 @@ func TestSweepExpiredJobsReportsDeleteFailures(t *testing.T) {
 func TestCleanJobSweepDoesNotReport(t *testing.T) {
 	a, rep := newTestApp(t, fakeTransformer(t, "succeed")...)
 	j := completedJob(t, a)
-	expireEverything(t)
+	expireEverything(t, a)
 
 	if err := a.sweepExpiredJobs(); err != nil {
 		t.Fatalf("sweepExpiredJobs: %v", err)

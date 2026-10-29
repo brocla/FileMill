@@ -6,16 +6,9 @@ import (
 	"time"
 )
 
-// alertTimeFormat is fixed-width, unlike RFC3339Nano, which trims trailing
-// zeros from the fraction: "10:00:00Z" sorts after "10:00:00.5Z". The alert
-// windows are compared as strings in SQL, so the width matters.
-const alertTimeFormat = "2006-01-02T15:04:05.000000000Z07:00"
-
 // alertSendsRetention is the longest window the alert caps read, the rolling
 // 24h of the daily cap. Older rows are pruned on each write.
 const alertSendsRetention = 24 * time.Hour
-
-func formatAlertTime(t time.Time) string { return t.UTC().Format(alertTimeFormat) }
 
 // LastAlert returns when category last sent an alert and how many have been
 // suppressed since. Zero values mean it has no record; a zero sentAt with a
@@ -33,7 +26,7 @@ func (s *Store) LastAlert(category string) (time.Time, int, error) {
 	if !sentAt.Valid {
 		return time.Time{}, suppressed, nil
 	}
-	t, err := time.Parse(alertTimeFormat, sentAt.String)
+	t, err := time.Parse(timeFormat, sentAt.String)
 	if err != nil {
 		return time.Time{}, 0, fmt.Errorf("alert_state %s: %w", category, err)
 	}
@@ -50,13 +43,13 @@ func (s *Store) RecordAlertSent(category string, at time.Time) error {
 	}
 	defer tx.Rollback()
 	if _, err := tx.Exec(`INSERT INTO alert_state(category,last_sent_at,suppressed) VALUES(?,?,0)
- ON CONFLICT(category) DO UPDATE SET last_sent_at=excluded.last_sent_at`, category, formatAlertTime(at)); err != nil {
+ ON CONFLICT(category) DO UPDATE SET last_sent_at=excluded.last_sent_at`, category, formatTime(at)); err != nil {
 		return err
 	}
-	if _, err := tx.Exec("INSERT INTO alert_sends(sent_at) VALUES(?)", formatAlertTime(at)); err != nil {
+	if _, err := tx.Exec("INSERT INTO alert_sends(sent_at) VALUES(?)", formatTime(at)); err != nil {
 		return err
 	}
-	if _, err := tx.Exec("DELETE FROM alert_sends WHERE sent_at<=?", formatAlertTime(at.Add(-alertSendsRetention))); err != nil {
+	if _, err := tx.Exec("DELETE FROM alert_sends WHERE sent_at<=?", formatTime(at.Add(-alertSendsRetention))); err != nil {
 		return err
 	}
 	return tx.Commit()
@@ -78,7 +71,7 @@ func (s *Store) RecordAlertSuppressed(category string) error {
 
 // AlertSendsSince returns every alert send after t, oldest first.
 func (s *Store) AlertSendsSince(t time.Time) ([]time.Time, error) {
-	rows, err := s.db.Query("SELECT sent_at FROM alert_sends WHERE sent_at>? ORDER BY sent_at", formatAlertTime(t))
+	rows, err := s.db.Query("SELECT sent_at FROM alert_sends WHERE sent_at>? ORDER BY sent_at", formatTime(t))
 	if err != nil {
 		return nil, err
 	}
@@ -89,7 +82,7 @@ func (s *Store) AlertSendsSince(t time.Time) ([]time.Time, error) {
 		if err := rows.Scan(&raw); err != nil {
 			return nil, err
 		}
-		at, err := time.Parse(alertTimeFormat, raw)
+		at, err := time.Parse(timeFormat, raw)
 		if err != nil {
 			return nil, fmt.Errorf("alert_sends: %w", err)
 		}

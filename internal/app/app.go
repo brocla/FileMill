@@ -51,7 +51,17 @@ type App struct {
 	log        *log.Logger
 	logFile    *os.File
 	reporter   alert.Reporter
+	now        func() time.Time // nil means time.Now; tests set a fake clock
 }
+
+// clock is the time the job sweep measures retention against.
+func (a *App) clock() time.Time {
+	if a.now != nil {
+		return a.now()
+	}
+	return time.Now()
+}
+
 type OutputFile struct{ Name, Path string }
 
 func Open(root string) (*App, error) {

@@ -9,6 +9,18 @@ import (
 	_ "modernc.org/sqlite"
 )
 
+// timeFormat is how every timestamp is stored. It is fixed-width, unlike
+// RFC3339Nano, which trims trailing zeros from the fraction: "10:00:00Z" sorts
+// after "10:00:00.5Z". Retention cutoffs, alert windows, and queue order are
+// all compared as strings in SQL, so the width matters.
+//
+// Rows written before jobs and deliveries used it are still RFC3339Nano. Reads
+// parse them with time.RFC3339Nano, which accepts both, and comparing them
+// against fixed-width text can misorder only within the same second.
+const timeFormat = "2006-01-02T15:04:05.000000000Z07:00"
+
+func formatTime(t time.Time) string { return t.UTC().Format(timeFormat) }
+
 type Job struct {
 	ID, Operation, Status, InputName, Message string
 	CreatedAt                                 time.Time
@@ -354,7 +366,7 @@ func (s *Store) PendingEmails() ([]EmailSubmission, error) {
 // has already been mailed out.
 func (s *Store) PutDelivery(submissionID int64, outputIndex int, fileID, link string) error {
 	_, err := s.db.Exec("INSERT OR IGNORE INTO email_deliveries(submission_id,output_index,file_id,link,created_at) VALUES(?,?,?,?,?)",
-		submissionID, outputIndex, fileID, link, time.Now().UTC().Format(time.RFC3339Nano))
+		submissionID, outputIndex, fileID, link, formatTime(time.Now()))
 	return err
 }
 
@@ -380,7 +392,7 @@ func (s *Store) Delivery(submissionID int64, outputIndex int) (Delivery, bool, e
 // retention sweep has not yet deleted.
 func (s *Store) ExpiredDeliveries(cutoff time.Time) ([]Delivery, error) {
 	rows, err := s.db.Query("SELECT submission_id,output_index,file_id,link,created_at FROM email_deliveries WHERE deleted_at IS NULL AND created_at<? ORDER BY created_at",
-		cutoff.UTC().Format(time.RFC3339Nano))
+		formatTime(cutoff))
 	if err != nil {
 		return nil, err
 	}
@@ -401,17 +413,17 @@ func (s *Store) ExpiredDeliveries(cutoff time.Time) ([]Delivery, error) {
 // MarkDeliveryDeleted records that the sweep removed the Drive file.
 func (s *Store) MarkDeliveryDeleted(submissionID int64, outputIndex int) error {
 	_, err := s.db.Exec("UPDATE email_deliveries SET deleted_at=? WHERE submission_id=? AND output_index=?",
-		time.Now().UTC().Format(time.RFC3339Nano), submissionID, outputIndex)
+		formatTime(time.Now()), submissionID, outputIndex)
 	return err
 }
 
 func (s *Store) MarkEmailDelivered(id int64) error {
-	_, err := s.db.Exec("UPDATE email_submissions SET delivered_at=? WHERE id=?", time.Now().UTC().Format(time.RFC3339Nano), id)
+	_, err := s.db.Exec("UPDATE email_submissions SET delivered_at=? WHERE id=?", formatTime(time.Now()), id)
 	return err
 }
 func (s *Store) Close() error { return s.db.Close() }
 func (s *Store) Create(j Job) error {
-	_, err := s.db.Exec("INSERT INTO jobs(id, operation, status, input_name, created_at) VALUES(?,?,?,?,?)", j.ID, j.Operation, StatusQueued, j.InputName, j.CreatedAt.UTC().Format(time.RFC3339Nano))
+	_, err := s.db.Exec("INSERT INTO jobs(id, operation, status, input_name, created_at) VALUES(?,?,?,?,?)", j.ID, j.Operation, StatusQueued, j.InputName, formatTime(j.CreatedAt))
 	return err
 }
 func (s *Store) Next() (*Job, error) {
@@ -429,7 +441,7 @@ func (s *Store) Next() (*Job, error) {
 		return nil, err
 	}
 	j.CreatedAt, _ = time.Parse(time.RFC3339Nano, created)
-	res, err := tx.Exec("UPDATE jobs SET status=?, started_at=? WHERE id=? AND status=?", StatusRunning, time.Now().UTC().Format(time.RFC3339Nano), j.ID, StatusQueued)
+	res, err := tx.Exec("UPDATE jobs SET status=?, started_at=? WHERE id=? AND status=?", StatusRunning, formatTime(time.Now()), j.ID, StatusQueued)
 	if err != nil {
 		return nil, err
 	}
@@ -444,7 +456,7 @@ func (s *Store) Next() (*Job, error) {
 	return &j, nil
 }
 func (s *Store) Complete(id, status, message string) error {
-	_, err := s.db.Exec("UPDATE jobs SET status=?, message=?, completed_at=? WHERE id=?", status, message, time.Now().UTC().Format(time.RFC3339Nano), id)
+	_, err := s.db.Exec("UPDATE jobs SET status=?, message=?, completed_at=? WHERE id=?", status, message, formatTime(time.Now()), id)
 	return err
 }
 
@@ -460,7 +472,7 @@ const interruptedMessage = "interrupted: FileMill stopped while this job was run
 // the delivery loop takes as finished.
 func (s *Store) InterruptRunning() (int, error) {
 	res, err := s.db.Exec("UPDATE jobs SET status=?, message=?, completed_at=? WHERE status=?",
-		StatusInterrupted, interruptedMessage, time.Now().UTC().Format(time.RFC3339Nano), StatusRunning)
+		StatusInterrupted, interruptedMessage, formatTime(time.Now()), StatusRunning)
 	if err != nil {
 		return 0, err
 	}
@@ -474,7 +486,7 @@ func (s *Store) InterruptRunning() (int, error) {
 // is never a candidate no matter how old it is.
 func (s *Store) ExpiredJobs(cutoff time.Time) ([]string, error) {
 	rows, err := s.db.Query("SELECT id FROM jobs WHERE files_deleted_at IS NULL AND completed_at IS NOT NULL AND completed_at<? ORDER BY completed_at",
-		cutoff.UTC().Format(time.RFC3339Nano))
+		formatTime(cutoff))
 	if err != nil {
 		return nil, err
 	}
@@ -495,7 +507,7 @@ func (s *Store) ExpiredJobs(cutoff time.Time) ([]string, error) {
 // gone — only this one column changes.
 func (s *Store) MarkJobFilesDeleted(id string) error {
 	_, err := s.db.Exec("UPDATE jobs SET files_deleted_at=? WHERE id=?",
-		time.Now().UTC().Format(time.RFC3339Nano), id)
+		formatTime(time.Now()), id)
 	return err
 }
 

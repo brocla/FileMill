@@ -10,7 +10,7 @@ import (
 func TestJobSweepTickSurvivesPanic(t *testing.T) {
 	a, rep := newTestApp(t, fakeTransformer(t, "succeed")...)
 	completedJob(t, a)
-	expireEverything(t)
+	expireEverything(t, a)
 	saved := removeWorkspace
 	removeWorkspace = func(string) error { panic("boom") }
 	t.Cleanup(func() { removeWorkspace = saved })
