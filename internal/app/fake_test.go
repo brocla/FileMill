@@ -55,6 +55,14 @@ func actOut(mode string) int {
 	case "bad-version":
 		writeResult("0", true, "done")
 		return 0
+	case "succeed-html": // a report with an HTML version
+		writeResultJSON(contract.Result{ContractVersion: contract.Version, Success: true,
+			Message: fakeReport, MessageHTML: fakeReportHTML})
+		return 0
+	case "reject-html": // turned down, with HTML FileMill must not use
+		writeResultJSON(contract.Result{ContractVersion: contract.Version, Success: false,
+			Message: "not a schedule", MessageHTML: fakeReportHTML})
+		return 0
 	case "succeed-exit": // result and exit code contradict each other
 		writeResult(contract.Version, true, "done")
 		return 3
@@ -66,8 +74,19 @@ func actOut(mode string) int {
 	return 2
 }
 
+// fakeReport and fakeReportHTML are what the succeed-html fake reports: a
+// multi-line message, as a real report is, and its HTML version.
+const (
+	fakeReport     = "All checks passed\nCONTINUOUS COVERAGE - OK\nNEVER TWO AT ONCE - OK"
+	fakeReportHTML = "<table><tr><td>All checks passed</td></tr></table>"
+)
+
 func writeResult(version string, success bool, message string) {
-	b, err := json.Marshal(contract.Result{ContractVersion: version, Success: success, Message: message})
+	writeResultJSON(contract.Result{ContractVersion: version, Success: success, Message: message})
+}
+
+func writeResultJSON(result contract.Result) {
+	b, err := json.Marshal(result)
 	if err == nil {
 		err = os.WriteFile("result.json", b, 0644)
 	}

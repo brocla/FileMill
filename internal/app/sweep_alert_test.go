@@ -22,7 +22,7 @@ func expireEverything(t *testing.T, a *App) {
 func completedJob(t *testing.T, a *App) store.Job {
 	t.Helper()
 	j := claimJob(t, a)
-	if err := a.store.Complete(j.ID, store.StatusSucceeded, "ok"); err != nil {
+	if err := a.store.Complete(j.ID, store.StatusSucceeded, "ok", ""); err != nil {
 		t.Fatal(err)
 	}
 	return j

@@ -20,6 +20,7 @@ type Result struct {
 	ContractVersion string         `json:"contract_version"`
 	Success         bool           `json:"success"`
 	Message         string         `json:"message"`
+	MessageHTML     string         `json:"message_html,omitempty"` // optional HTML version of Message; used only on success
 	ErrorCode       string         `json:"error_code,omitempty"`
 	OutputFiles     []OutputFile   `json:"output_files,omitempty"`
 	Details         map[string]any `json:"details"`

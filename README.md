@@ -438,3 +438,70 @@ workspace before the transformer is even started:
 When the transformer exits, FileMill looks for `result.json` in the same
 workspace — `examples/transformers/uppercase/main.go` shows the matching
 write side of that contract.
+
+### The result.json contract
+
+`uppercase`, after a successful run, writes:
+
+```json
+{
+  "contract_version": "1",
+  "success": true,
+  "message": "File uppercased",
+  "message_html": "<p style=\"margin:16px;font-family:Arial,sans-serif;\">File uppercased</p>",
+  "output_files": [
+    {
+      "name": "uppercase-example.txt",
+      "path": "output/uppercase-example.txt"
+    }
+  ],
+  "details": {}
+}
+```
+
+- **`contract_version`** — must be `"1"`. Any other value fails the job.
+- **`success`** — `true` if the job did what was asked. `false` is how a
+  transformer turns its input down ("not a worker list"): the job fails, the
+  sender gets the message, and the operator is *not* alerted. A crash, a
+  missing `result.json`, or `success: true` with a non-zero exit code is
+  FileMill's problem instead, and alerts.
+- **`message`** — required. One line for the sender, or a whole report: it is
+  the body of the reply (plain text). Only its first line goes into
+  `filemill.log`.
+- **`message_html`** — optional; see below. Used only when `success` is
+  `true`.
+- **`error_code`** — optional, a short code for a failure, for logs.
+- **`output_files`** — every artifact in `output/`, by workspace-relative
+  path. They are attached to the reply, or published as Google Sheets on a
+  `sheets-link` address. A job may produce none: a report delivered entirely
+  in the message needs no file.
+- **`details`** — free-form data for logs and debugging.
+
+#### HTML replies (`message_html`)
+
+When a successful job's `message_html` is set, the reply is sent as both
+plain text and HTML: `message` is the text part, which a text-only mail client
+shows, and `message_html` goes into the HTML part. FileMill wraps it in the
+page, puts a small caption naming the input file and report above it, and
+adds the sheet links (on a `sheets-link` address) and the support line below.
+A transformer that doesn't set `message_html` gets exactly a plain-text reply,
+as before. The field is additive, so a transformer may send it to an older
+FileMill, which ignores it.
+
+The fragment must be:
+
+- **A fragment**, placed inside the reply's `<body>`: no `<!doctype>`,
+  `<html>`, `<head>` or `<body>`. Don't repeat the input file's name; FileMill's
+  caption already shows it.
+- **Email-safe:** inline `style` attributes only, tables for layout, no
+  `<script>`, no external stylesheets, fonts or images, and designed for
+  widths up to about 600px. Gmail strips `<style>` blocks, and Outlook lays
+  mail out with Word.
+- **Escaped by the transformer.** FileMill inserts it verbatim. A transformer
+  is code the operator installed, so its HTML is trusted the way its output
+  files are, and it must escape any text it takes from the input.
+- **Small:** well under 100 KB. Gmail clips a message over about 102 KB behind
+  a "View entire message" link.
+
+`examples/transformers/uppercase` sets a one-line `message_html` to show the
+shape.

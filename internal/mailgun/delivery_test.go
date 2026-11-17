@@ -3,6 +3,7 @@ package mailgun
 import (
 	"context"
 	"fmt"
+	"io"
 	"mime"
 	"mime/multipart"
 	"net/http"
@@ -48,8 +49,9 @@ func (p *fakePublisher) Delete(_ context.Context, fileID string) error {
 
 // sentMessage is one reply captured from the fake Mailgun endpoint.
 type sentMessage struct {
-	to, subject, text string
-	attachments       []string
+	to, subject, text, html string
+	hasHTML                 bool // the html field was sent at all
+	attachments             []string
 }
 
 // fakeMailgun is a stand-in Send API that records replies. Addresses listed in
@@ -74,17 +76,18 @@ func (m *fakeMailgun) start(t *testing.T) *httptest.Server {
 			if err != nil {
 				break
 			}
-			buf := make([]byte, 4096)
-			n, _ := part.Read(buf)
+			value, _ := io.ReadAll(part)
 			switch {
 			case part.FileName() != "":
 				msg.attachments = append(msg.attachments, part.FileName())
 			case part.FormName() == "to":
-				msg.to = string(buf[:n])
+				msg.to = string(value)
 			case part.FormName() == "subject":
-				msg.subject = string(buf[:n])
+				msg.subject = string(value)
 			case part.FormName() == "text":
-				msg.text = string(buf[:n])
+				msg.text = string(value)
+			case part.FormName() == "html":
+				msg.html, msg.hasHTML = string(value), true
 			}
 		}
 		if m.failTo[msg.to] {
