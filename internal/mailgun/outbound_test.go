@@ -42,7 +42,7 @@ func TestSendTimesOut(t *testing.T) {
 	defer server.Close()
 
 	s := sendTestService(server.URL, &http.Client{Timeout: 20 * time.Millisecond})
-	if err := s.send(context.Background(), "to@x", "subj", "", "body", nil); err == nil {
+	if err := s.send(context.Background(), "to@x", "subj", "", "body", "", nil); err == nil {
 		t.Fatal("expected a timeout error, got nil")
 	}
 }
@@ -58,7 +58,7 @@ func TestSendHonorsCancelledContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	s := sendTestService(server.URL, &http.Client{Timeout: time.Second})
-	if err := s.send(ctx, "to@x", "subj", "", "body", nil); err == nil {
+	if err := s.send(ctx, "to@x", "subj", "", "body", "", nil); err == nil {
 		t.Fatal("expected a cancellation error, got nil")
 	}
 }
@@ -73,7 +73,7 @@ func TestSendIncludesMailgunErrorBody(t *testing.T) {
 	defer server.Close()
 
 	s := sendTestService(server.URL, &http.Client{Timeout: time.Second})
-	err := s.send(context.Background(), "to@x", "subj", "", "body", nil)
+	err := s.send(context.Background(), "to@x", "subj", "", "body", "", nil)
 	if err == nil {
 		t.Fatal("expected an error for a 400, got nil")
 	}

@@ -49,7 +49,7 @@ func TestInterruptRunningMarksAndCountsLeftovers(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if err := s.Complete("done", StatusSucceeded, "ok"); err != nil {
+	if err := s.Complete("done", StatusSucceeded, "ok", ""); err != nil {
 		t.Fatal(err)
 	}
 

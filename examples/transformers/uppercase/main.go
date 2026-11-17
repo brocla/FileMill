@@ -44,7 +44,7 @@ func main() {
 		fail(err.Error())
 		return
 	}
-	write(contract.Result{ContractVersion: contract.Version, Success: true, Message: "File uppercased", OutputFiles: []contract.OutputFile{{Name: filepath.Base(destination), Path: filepath.ToSlash(destination)}}, Details: map[string]any{}})
+	write(contract.Result{ContractVersion: contract.Version, Success: true, Message: "File uppercased", MessageHTML: `<p style="margin:16px;font-family:Arial,sans-serif;">File uppercased</p>`, OutputFiles: []contract.OutputFile{{Name: filepath.Base(destination), Path: filepath.ToSlash(destination)}}, Details: map[string]any{}})
 }
 func fail(message string) {
 	write(contract.Result{ContractVersion: contract.Version, Success: false, Message: message, ErrorCode: "UPPERCASE_FAILED", Details: map[string]any{}})

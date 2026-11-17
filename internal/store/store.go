@@ -23,6 +23,7 @@ func formatTime(t time.Time) string { return t.UTC().Format(timeFormat) }
 
 type Job struct {
 	ID, Operation, Status, InputName, Message string
+	MessageHTML                               string // empty unless a succeeded transformer sent message_html
 	CreatedAt                                 time.Time
 }
 type Store struct{ db *sql.DB }
@@ -84,15 +85,22 @@ func Open(path string) (*Store, error) {
 	_, err = db.Exec(`CREATE TABLE IF NOT EXISTS jobs (
  id TEXT PRIMARY KEY, operation TEXT NOT NULL, status TEXT NOT NULL, input_name TEXT NOT NULL,
  message TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, started_at TEXT, completed_at TEXT,
- files_deleted_at TEXT
+ files_deleted_at TEXT, message_html TEXT NOT NULL DEFAULT ''
 ); CREATE INDEX IF NOT EXISTS jobs_status_created ON jobs(status, created_at);`)
 	if err != nil {
 		db.Close()
 		return nil, err
 	}
-	if err := migrateJobFilesDeletedColumn(db); err != nil {
-		db.Close()
-		return nil, fmt.Errorf("migrate jobs: %w", err)
+	for _, column := range []struct{ name, definition string }{
+		{"files_deleted_at", "TEXT"},
+		// The default keeps the rollback binary, which inserts jobs without
+		// naming this column, working against a migrated database.
+		{"message_html", "TEXT NOT NULL DEFAULT ''"},
+	} {
+		if err := addJobsColumn(db, column.name, column.definition); err != nil {
+			db.Close()
+			return nil, fmt.Errorf("migrate jobs: %w", err)
+		}
 	}
 	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS jobs_sweep ON jobs(files_deleted_at, completed_at)`); err != nil {
 		db.Close()
@@ -201,16 +209,16 @@ func migrateSubmissionKey(db *sql.DB) error {
 	return tx.Commit()
 }
 
-// migrateJobFilesDeletedColumn adds files_deleted_at to jobs on a database
-// created before the age-based job sweep existed. It is a no-op once the
-// column exists, so it costs one PRAGMA per start on every database after
-// the first — the same trade the CREATE TABLE IF NOT EXISTS statements above
-// already make.
+// addJobsColumn adds a column to jobs on a database created before it existed:
+// files_deleted_at before the age-based job sweep, message_html before HTML
+// replies. It is a no-op once the column exists, so it costs one PRAGMA per
+// start on every database after the first — the same trade the CREATE TABLE
+// IF NOT EXISTS statements above already make.
 //
 // A plain ALTER TABLE ADD COLUMN suffices here, unlike migrateSubmissionKey's
-// rebuild: SQLite can add a nullable column in place, it just can't drop or
-// widen a constraint that way.
-func migrateJobFilesDeletedColumn(db *sql.DB) error {
+// rebuild: SQLite can add a column in place, nullable or NOT NULL with a
+// constant default; it just can't drop or widen a constraint that way.
+func addJobsColumn(db *sql.DB, name, definition string) error {
 	rows, err := db.Query(`PRAGMA table_info(jobs)`)
 	if err != nil {
 		return err
@@ -218,19 +226,20 @@ func migrateJobFilesDeletedColumn(db *sql.DB) error {
 	defer rows.Close()
 	for rows.Next() {
 		var cid, notnull, pk int
-		var name, ctype string
+		var existing, ctype string
 		var dflt sql.NullString
-		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); err != nil {
+		if err := rows.Scan(&cid, &existing, &ctype, &notnull, &dflt, &pk); err != nil {
 			return err
 		}
-		if name == "files_deleted_at" {
+		if existing == name {
 			return nil
 		}
 	}
 	if err := rows.Err(); err != nil {
 		return err
 	}
-	_, err = db.Exec(`ALTER TABLE jobs ADD COLUMN files_deleted_at TEXT`)
+	rows.Close()
+	_, err = db.Exec(fmt.Sprintf("ALTER TABLE jobs ADD COLUMN %s %s", name, definition))
 	return err
 }
 
@@ -334,14 +343,14 @@ func (s *Store) PendingEmails() ([]EmailSubmission, error) {
 
 	var out []EmailSubmission
 	for _, e := range subs {
-		jr, err := s.db.Query("SELECT j.id,j.operation,j.status,j.input_name,j.message,j.created_at,esj.attachment_index FROM email_submission_jobs esj JOIN jobs j ON j.id=esj.job_id WHERE esj.submission_id=? ORDER BY esj.attachment_index", e.ID)
+		jr, err := s.db.Query("SELECT j.id,j.operation,j.status,j.input_name,j.message,j.message_html,j.created_at,esj.attachment_index FROM email_submission_jobs esj JOIN jobs j ON j.id=esj.job_id WHERE esj.submission_id=? ORDER BY esj.attachment_index", e.ID)
 		if err != nil {
 			return nil, err
 		}
 		for jr.Next() {
 			var x EmailJob
 			var c string
-			if err := jr.Scan(&x.Job.ID, &x.Job.Operation, &x.Job.Status, &x.Job.InputName, &x.Job.Message, &c, &x.Index); err != nil {
+			if err := jr.Scan(&x.Job.ID, &x.Job.Operation, &x.Job.Status, &x.Job.InputName, &x.Job.Message, &x.Job.MessageHTML, &c, &x.Index); err != nil {
 				jr.Close()
 				return nil, err
 			}
@@ -455,8 +464,8 @@ func (s *Store) Next() (*Job, error) {
 	j.Status = StatusRunning
 	return &j, nil
 }
-func (s *Store) Complete(id, status, message string) error {
-	_, err := s.db.Exec("UPDATE jobs SET status=?, message=?, completed_at=? WHERE id=?", status, message, formatTime(time.Now()), id)
+func (s *Store) Complete(id, status, message, messageHTML string) error {
+	_, err := s.db.Exec("UPDATE jobs SET status=?, message=?, message_html=?, completed_at=? WHERE id=?", status, message, messageHTML, formatTime(time.Now()), id)
 	return err
 }
 
@@ -514,7 +523,7 @@ func (s *Store) MarkJobFilesDeleted(id string) error {
 func (s *Store) Get(id string) (Job, error) {
 	var j Job
 	var c string
-	err := s.db.QueryRow("SELECT id,operation,status,input_name,message,created_at FROM jobs WHERE id=?", id).Scan(&j.ID, &j.Operation, &j.Status, &j.InputName, &j.Message, &c)
+	err := s.db.QueryRow("SELECT id,operation,status,input_name,message,message_html,created_at FROM jobs WHERE id=?", id).Scan(&j.ID, &j.Operation, &j.Status, &j.InputName, &j.Message, &j.MessageHTML, &c)
 	if err != nil {
 		return Job{}, err
 	}

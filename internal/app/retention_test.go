@@ -36,7 +36,7 @@ func TestSweepExpiredJobsDeletesOldWorkspaceOnly(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := a.store.Complete(oldID, store.StatusSucceeded, "ok"); err != nil {
+	if err := a.store.Complete(oldID, store.StatusSucceeded, "ok", ""); err != nil {
 		t.Fatal(err)
 	}
 	// The pauses only make the three times distinct on Windows' coarse clock.
@@ -48,7 +48,7 @@ func TestSweepExpiredJobsDeletesOldWorkspaceOnly(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := a.store.Complete(freshID, store.StatusSucceeded, "ok"); err != nil {
+	if err := a.store.Complete(freshID, store.StatusSucceeded, "ok", ""); err != nil {
 		t.Fatal(err)
 	}
 	a.now = func() time.Time { return boundary.Add(jobRetentionPeriod) }
@@ -102,7 +102,7 @@ func TestSweepExpiredJobsToleratesAlreadyMissingWorkspace(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := a.store.Complete(id, store.StatusSucceeded, "ok"); err != nil {
+	if err := a.store.Complete(id, store.StatusSucceeded, "ok", ""); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.RemoveAll(filepath.Join(root, "data", "jobs", id)); err != nil {

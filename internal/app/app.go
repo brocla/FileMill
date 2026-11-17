@@ -319,7 +319,7 @@ func (a *App) execute(parent context.Context, j store.Job) {
 	defer func() {
 		if r := recover(); r != nil {
 			a.log.Printf("job=%s panic=%v", j.ID, r)
-			a.finish(j.ID, store.StatusFailed, panicMessage)
+			a.finish(j.ID, store.StatusFailed, panicMessage, "")
 			a.reportJob("panic", j, fmt.Sprintf("%s job panicked: %v", j.Operation, r), panicMessage,
 				fmt.Sprintf("Panic: %v\n\n%s", r, debug.Stack()))
 		}
@@ -352,11 +352,11 @@ func (a *App) execute(parent context.Context, j store.Job) {
 		switch {
 		case readErr == nil && !result.Success:
 			// Turned down through the contract, whatever the exit code.
-			a.finish(j.ID, store.StatusFailed, msg)
+			a.finish(j.ID, store.StatusFailed, msg, "")
 		case parent.Err() != nil:
 			// The worker is shutting down and killed the transformer. That is
 			// FileMill stopping, not the transformer failing.
-			a.finish(j.ID, store.StatusFailed, msg)
+			a.finish(j.ID, store.StatusFailed, msg, "")
 		case readErr != nil:
 			a.failSystemic(j, msg, fmt.Errorf("%w; %w", err, readErr), output)
 		default:
@@ -374,24 +374,39 @@ func (a *App) execute(parent context.Context, j store.Job) {
 		return
 	}
 	if !result.Success {
-		a.finish(j.ID, store.StatusFailed, result.Message)
+		a.finish(j.ID, store.StatusFailed, result.Message, "")
 		return
 	}
-	a.finish(j.ID, store.StatusSucceeded, result.Message)
+	a.finish(j.ID, store.StatusSucceeded, result.Message, result.MessageHTML)
 }
-func (a *App) finish(id, status, message string) {
-	if err := a.store.Complete(id, status, message); err != nil {
+
+// finish records a job's outcome. messageHTML is the transformer's HTML
+// version of a successful report; every other outcome passes "".
+func (a *App) finish(id, status, message, messageHTML string) {
+	if err := a.store.Complete(id, status, message, messageHTML); err != nil {
 		a.log.Printf("job=%s completion_error=%v", id, err)
 		return
 	}
-	a.log.Printf("job=%s status=%s message=%q", id, status, message)
+	a.log.Printf("job=%s status=%s message=%q", id, status, firstLine(message))
+}
+
+// firstLine is what the log keeps of a job's message. A report can run to
+// dozens of lines, which %q would turn into one long line of \n escapes per
+// job; the full text is in the database and the reply. "..." marks a cut.
+func firstLine(message string) string {
+	line, rest, cut := strings.Cut(message, "\n")
+	line = strings.TrimSuffix(line, "\r")
+	if cut && strings.TrimSpace(rest) != "" {
+		return line + "..."
+	}
+	return line
 }
 
 // failSystemic fails a job the transformer didn't handle through the contract
 // and reports it. cause adds what the job's message leaves out, such as the
 // exit status.
 func (a *App) failSystemic(j store.Job, message string, cause error, output []byte) {
-	a.finish(j.ID, store.StatusFailed, message)
+	a.finish(j.ID, store.StatusFailed, message, "")
 	var extra strings.Builder
 	if cause != nil {
 		fmt.Fprintf(&extra, "Cause: %v\n", cause)

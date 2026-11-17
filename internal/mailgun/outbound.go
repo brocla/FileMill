@@ -122,10 +122,21 @@ func (s *Service) deliver(ctx context.Context, sub store.EmailSubmission) error 
 	var lines []string
 	var outputs []app.OutputFile
 	var labels []string
+	// sections is the HTML reply's body, one per job. It is sent only when a
+	// succeeded job brought HTML of its own; otherwise the reply stays plain
+	// text, exactly as it was before HTML replies existed.
+	var sections []string
+	hasHTML := false
 	for _, item := range sub.Jobs {
 		label := s.engine.OperationLabel(item.Job.Operation)
-		lines = append(lines, fmt.Sprintf("%s (%s): %s",
-			item.Job.InputName, label, item.Job.Message))
+		line := fmt.Sprintf("%s (%s): %s", item.Job.InputName, label, item.Job.Message)
+		lines = append(lines, line)
+		if item.Job.Status != store.StatusSucceeded || item.Job.MessageHTML == "" {
+			sections = append(sections, plainParagraph(line))
+		} else {
+			sections = append(sections, htmlCaption(item.Job.InputName, label)+item.Job.MessageHTML)
+			hasHTML = true
+		}
 		if item.Job.Status != store.StatusSucceeded {
 			continue
 		}
@@ -142,9 +153,10 @@ func (s *Service) deliver(ctx context.Context, sub store.EmailSubmission) error 
 
 	// A link reply is the same send with no attachments: the attachment loop
 	// simply has nothing to walk.
-	var attachments []string
+	var attachments, links []string
 	if s.deliveryMode(sub.Recipient) == modeSheetsLink {
-		links, err := s.publish(ctx, sub.ID, outputs)
+		var err error
+		links, err = s.publish(ctx, sub.ID, outputs)
 		if err != nil {
 			return err
 		}
@@ -156,8 +168,12 @@ func (s *Service) deliver(ctx context.Context, sub store.EmailSubmission) error 
 	}
 
 	text = withSupportFooter(text, s.support)
+	var htmlBody string
+	if hasHTML {
+		htmlBody = htmlReply(sections, links, labels, s.support)
+	}
 
-	if err := s.send(ctx, sub.Sender, replySubject(sub.Subject), threadingID(sub.MessageID), text, attachments); err != nil {
+	if err := s.send(ctx, sub.Sender, replySubject(sub.Subject), threadingID(sub.MessageID), text, htmlBody, attachments); err != nil {
 		return err
 	}
 	return s.markDelivered(sub.ID)
@@ -361,6 +377,18 @@ func withLinks(text string, links, labels []string) string {
 	if len(links) == 0 {
 		return text
 	}
+	var b strings.Builder
+	b.WriteString(text)
+	fmt.Fprintf(&b, "\n\n%s\n", linkSentence(links, labels))
+	for _, link := range links {
+		b.WriteString("\n")
+		b.WriteString(link)
+	}
+	return b.String()
+}
+
+// linkSentence introduces the links, in the text reply and the HTML one alike.
+func linkSentence(links, labels []string) string {
 	// "spreadsheet" unless every succeeded job produced the same report, in
 	// which case that report's own name is more use to the reader.
 	what := "spreadsheet"
@@ -379,15 +407,7 @@ func withLinks(text string, links, labels []string) string {
 		sentence = fmt.Sprintf(
 			"Your %s are ready. Anyone with the link can view and edit them:", plural)
 	}
-
-	var b strings.Builder
-	b.WriteString(text)
-	fmt.Fprintf(&b, "\n\n%s\n", sentence)
-	for _, link := range links {
-		b.WriteString("\n")
-		b.WriteString(link)
-	}
-	return b.String()
+	return sentence
 }
 
 // withSupportFooter closes a reply with an invitation to write to the support
@@ -401,21 +421,26 @@ func withSupportFooter(text, address string) string {
 	if address == "" {
 		return text
 	}
-	return fmt.Sprintf("%s\n\nQuestions, problems, or suggestions? Your feedback is welcome at %s.", text, address)
+	return fmt.Sprintf("%s\n\n%s %s.", text, supportInvitation, address)
 }
+
+// supportInvitation opens the support line, in the text reply and the HTML one
+// alike.
+const supportInvitation = "Questions, problems, or suggestions? Your feedback is welcome at"
 
 // SendAlert sends one plain-text operator alert from REPLY_FROM, with its
 // subject as given: no "Re:", no threading, no attachments. It satisfies
 // alert.Mailer. It never reports its own failure: the alert channel is the
 // broken thing, and reporting it would only loop.
 func (s *Service) SendAlert(ctx context.Context, to, subject, text string) error {
-	return s.send(ctx, to, subject, "", text, nil)
+	return s.send(ctx, to, subject, "", text, "", nil)
 }
 
 // send posts one message to Mailgun's Send API with its subject as given.
 // With a messageID it is threaded into that conversation, and it carries the
-// given output files as attachments.
-func (s *Service) send(ctx context.Context, to, subject, messageID, text string, outputs []string) error {
+// given output files as attachments. A non-empty htmlBody is sent as the html
+// field beside text, and Mailgun builds the multipart/alternative message.
+func (s *Service) send(ctx context.Context, to, subject, messageID, text, htmlBody string, outputs []string) error {
 	var body bytes.Buffer
 	writer := multipart.NewWriter(&body)
 
@@ -428,6 +453,9 @@ func (s *Service) send(ctx context.Context, to, subject, messageID, text string,
 	if messageID != "" {
 		fields["h:In-Reply-To"] = messageID
 		fields["h:References"] = messageID
+	}
+	if htmlBody != "" {
+		fields["html"] = htmlBody
 	}
 	for name, value := range fields {
 		if err := writer.WriteField(name, value); err != nil {

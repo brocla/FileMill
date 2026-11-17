@@ -33,7 +33,7 @@ func TestExpiredJobsOrdersTimesWithinASecond(t *testing.T) {
 	if err := s.Create(Job{ID: "job", Operation: "copy_rename", InputName: "a.txt", CreatedAt: whole}); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.Complete("job", StatusSucceeded, "ok"); err != nil {
+	if err := s.Complete("job", StatusSucceeded, "ok", ""); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.backdateJobCompletion("job", whole.Add(500*time.Millisecond)); err != nil {
@@ -76,7 +76,7 @@ func TestStoredTimesAreFixedWidth(t *testing.T) {
 	if _, err := s.Next(); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.Complete("job", StatusSucceeded, "ok"); err != nil {
+	if err := s.Complete("job", StatusSucceeded, "ok", ""); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.MarkJobFilesDeleted("job"); err != nil {
@@ -219,7 +219,7 @@ func TestExpiredJobsRespectCutoffAndDeletion(t *testing.T) {
 	if err := s.Create(Job{ID: "old-job", Operation: "copy_rename", InputName: "a.txt", CreatedAt: now}); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.Complete("old-job", StatusSucceeded, "ok"); err != nil {
+	if err := s.Complete("old-job", StatusSucceeded, "ok", ""); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.backdateJobCompletion("old-job", now.Add(-31*24*time.Hour)); err != nil {
@@ -228,7 +228,7 @@ func TestExpiredJobsRespectCutoffAndDeletion(t *testing.T) {
 	if err := s.Create(Job{ID: "new-job", Operation: "copy_rename", InputName: "b.txt", CreatedAt: now}); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.Complete("new-job", StatusSucceeded, "ok"); err != nil {
+	if err := s.Complete("new-job", StatusSucceeded, "ok", ""); err != nil {
 		t.Fatal(err)
 	}
 
@@ -324,7 +324,7 @@ func TestConcurrentAccessDoesNotReturnBusy(t *testing.T) {
 					return
 				}
 				if j != nil {
-					if err := s.Complete(j.ID, StatusSucceeded, "done"); err != nil {
+					if err := s.Complete(j.ID, StatusSucceeded, "done", ""); err != nil {
 						errs <- fmt.Errorf("complete: %w", err)
 					}
 				}
